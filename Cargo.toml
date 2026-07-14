@@ -1,0 +1,19 @@
+[package]
+name = "chickadee-probe"
+version = "0.0.1"
+edition = "2024"
+
+[[bin]]
+name = "chickadee-probe"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+defmt-decoder = "1.1"
+elf2uf2-core = { git = "https://github.com/JoNil/elf2uf2-rs", features = ["clap"] }
+env_logger = "0.11"
+log = "0.4"
+nusb = { version = "0.2.3", features = ["smol"] }
+serialport = "4"
+sysinfo = "0.32"
