@@ -77,6 +77,9 @@ pub fn flash(
         return Err(e.context("Flash failed; partial UF2 file removed"));
     }
 
+    println!("UF2 written. Waiting for device to reboot...");
+    bootsel::wait_for_bootsel_unmount(Duration::from_secs(15))
+        .context("Device did not unmount BOOTSEL drive after flashing")?;
     println!("Flash complete.");
     Ok(())
 }

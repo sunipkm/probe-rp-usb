@@ -94,6 +94,24 @@ enum Cmd {
         #[arg(long)]
         port: Option<String>,
     },
+
+    /// Flash the firmware and immediately enter watch mode (equivalent to `probe-rs run`)
+    Run {
+        /// Input firmware file (ELF detected by magic bytes; anything else treated as raw binary)
+        input: PathBuf,
+
+        /// UF2 family to embed in the UF2 blocks
+        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        family: Family,
+
+        /// Flash base address used when the input is a raw binary (ignored for ELF)
+        #[arg(long, value_parser = parse_u32_hex, default_value = "0x10000000")]
+        address: u32,
+
+        /// Override the auto-detected serial port
+        #[arg(long)]
+        port: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -128,6 +146,16 @@ fn main() -> Result<()> {
 
         Cmd::Watch { elf, port } => {
             attach::watch(&elf, port, cli.vid, cli.pid)?;
+        }
+
+        Cmd::Run {
+            input,
+            family,
+            address,
+            port,
+        } => {
+            flash::flash(&input, family, address, cli.vid, cli.pid)?;
+            attach::watch(&input, port, cli.vid, cli.pid)?;
         }
     }
 

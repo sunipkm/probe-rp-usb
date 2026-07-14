@@ -28,3 +28,17 @@ pub fn wait_for_bootsel_drive(timeout: Duration) -> Result<PathBuf> {
     }
     anyhow::bail!("Timed out waiting for BOOTSEL drive to appear")
 }
+
+/// Poll until the BOOTSEL drive disappears (device has accepted the UF2 and is rebooting).
+///
+/// Returns `Ok(())` once no BOOTSEL drive is detected, or an error on timeout.
+pub fn wait_for_bootsel_unmount(timeout: Duration) -> Result<()> {
+    let deadline = Instant::now() + timeout;
+    while Instant::now() < deadline {
+        if find_bootsel_drive().is_none() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
+    anyhow::bail!("Timed out waiting for BOOTSEL drive to unmount")
+}
