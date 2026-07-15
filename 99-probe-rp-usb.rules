@@ -2,7 +2,9 @@
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", GROUP="plugdev", TAG+="uaccess", MODE="0666"
 # RP2040/RP2350 — BOOTSEL / picoboot (PID 0x000f)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000f", GROUP="plugdev", TAG+="uaccess", MODE="0666"
-# Custom VID fallback (0xC0DE)
+# Custom VID fallback (0xC0DE / 0xC001)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="c0de", GROUP="plugdev", TAG+="uaccess", MODE="0666"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="c001", GROUP="plugdev", TAG+="uaccess", MODE="0666"
 # CDC-ACM serial ports created for these devices
 SUBSYSTEM=="tty", ATTRS{idVendor}=="c0de", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="c001", MODE="0666", TAG+="uaccess"

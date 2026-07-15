@@ -1,4 +1,4 @@
-use probe_rp_usb::{attach, bootsel, flash, ui, usb};
+use probe_rp_usb::{attach, bootsel, flash, ui, usb, write};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -24,6 +24,20 @@ fn parse_u32_hex(s: &str) -> Result<u32, String> {
     }
 }
 
+/// Parse a `FILE@OFFSET` write target.  The offset is added to `--base` later.
+///
+/// Uses `rsplit_once('@')` so paths containing `@` are handled correctly.
+fn parse_write_target(s: &str) -> Result<write::WriteTarget, String> {
+    let (path_part, offset_part) = s
+        .rsplit_once('@')
+        .ok_or_else(|| format!("expected FILE@OFFSET, got {s:?}"))?;
+    let address = parse_u32_hex(offset_part)?;
+    Ok(write::WriteTarget {
+        path: PathBuf::from(path_part),
+        address,
+    })
+}
+
 #[derive(Parser)]
 #[command(
     name = "probe-rp-usb",
@@ -33,14 +47,14 @@ fn parse_u32_hex(s: &str) -> Result<u32, String> {
 )]
 struct Cli {
     /// USB Vendor ID (decimal or 0x-prefixed hex).
-    /// Default: 0x2E8A (Raspberry Pi). When omitted, devices with VID 0xC0DE are
+    /// Default: 0x2E8A (Raspberry Pi). When omitted, devices with VID 0xC0DE or 0xC001 are
     /// also probed as a fallback.
     #[arg(long, global = true, value_parser = parse_u16_hex)]
     vid: Option<u16>,
 
     /// USB Product ID in app mode (decimal or 0x-prefixed hex).
     /// Default: 0x0009 (pico_stdio_usb). When omitted together with --vid, the
-    /// 0xC0DE fallback scan accepts any PID.
+    /// 0xC0DE/0xC001 fallback scan accepts any PID.
     #[arg(long, global = true, value_parser = parse_u16_hex)]
     pid: Option<u16>,
 
@@ -82,6 +96,40 @@ enum Cmd {
         /// Flash base address used when the input is a raw binary (ignored for ELF)
         #[arg(long, value_parser = parse_u32_hex, default_value = "0x10000000")]
         address: u32,
+
+        /// Do not wait for the device to reboot after flashing (leaves device in BOOTSEL mode).
+        /// Useful when writing data partitions that should not trigger a firmware reset.
+        #[arg(long)]
+        no_wait: bool,
+    },
+
+    /// Write one or more raw binary images to flash at specific addresses
+    ///
+    /// Each FILE@OFFSET argument specifies a binary file and its offset relative
+    /// to --base (default 0x0, i.e. offsets are absolute addresses).  All images
+    /// are written as a single UF2 file so the device resets exactly once.
+    Write {
+        /// One or more `FILE@OFFSET` targets, e.g. `data.bin@0x100000`.
+        /// Offsets are added to --base to produce the final flash address.
+        #[arg(required = true, value_parser = parse_write_target, value_name = "FILE@OFFSET")]
+        targets: Vec<write::WriteTarget>,
+
+        /// Base address added to every offset (decimal or 0x-prefixed hex).
+        /// Use this to address regions relative to a partition start.
+        /// Default: 0x0 (offsets are treated as absolute flash addresses).
+        #[arg(long, value_parser = parse_u32_hex, default_value = "0x0")]
+        base: u32,
+
+        /// UF2 family to embed in the UF2 blocks
+        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        family: Family,
+
+        /// Prepend a 256-byte block of 0xFF at 0x10000000 (the start of flash)
+        /// to invalidate the existing firmware header before the data is written.
+        /// This prevents the device from booting stale firmware if it resets
+        /// mid-transfer.
+        #[arg(long)]
+        erase_boot: bool,
     },
 
     /// Attach to the device's last serial port and decode defmt output
@@ -121,6 +169,26 @@ enum Cmd {
         #[arg(long)]
         port: Option<String>,
     },
+
+    /// Erase the entire flash by writing 0xFF to every page
+    ///
+    /// Generates a UF2 file that covers all FLASH_SIZE bytes starting at --base,
+    /// with every byte set to 0xFF.  This restores flash to its erased state,
+    /// removing any existing firmware or data.
+    Erase {
+        /// Total flash size in bytes (decimal or 0x-prefixed hex).
+        /// Common values: 0x200000 (2 MiB), 0x400000 (4 MiB), 0x800000 (8 MiB).
+        #[arg(value_parser = parse_u32_hex)]
+        flash_size: u32,
+
+        /// Flash start address (decimal or 0x-prefixed hex)
+        #[arg(long, value_parser = parse_u32_hex, default_value = "0x10000000")]
+        base: u32,
+
+        /// UF2 family to embed in the UF2 blocks
+        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        family: Family,
+    },
 }
 
 fn main() {
@@ -154,11 +222,36 @@ fn run(cli: Cli) -> Result<()> {
             input,
             family,
             address,
+            no_wait,
         } => {
             flash::flash(
                 &input,
                 family,
                 address,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
+                no_wait,
+            )?;
+        }
+
+        Cmd::Write {
+            targets,
+            base,
+            family,
+            erase_boot,
+        } => {
+            let targets: Vec<write::WriteTarget> = targets
+                .into_iter()
+                .map(|t| write::WriteTarget {
+                    path: t.path,
+                    address: base.wrapping_add(t.address),
+                })
+                .collect();
+            write::write_data(
+                &targets,
+                erase_boot,
+                family,
                 cli.vid,
                 cli.pid,
                 cli.bootsel_timeout,
@@ -187,6 +280,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.vid,
                 cli.pid,
                 cli.bootsel_timeout,
+                false,
             )?;
             attach::watch(
                 &input,
@@ -195,6 +289,21 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.baud,
                 cli.read_timeout_ms,
+            )?;
+        }
+
+        Cmd::Erase {
+            flash_size,
+            base,
+            family,
+        } => {
+            write::erase_flash(
+                flash_size,
+                base,
+                family,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
             )?;
         }
     }
@@ -213,7 +322,7 @@ fn is_permission_error(e: &anyhow::Error) -> bool {
 }
 
 /// Resolve the serial port: use the override if provided, else auto-detect by VID/PID.
-/// When neither --vid nor --pid was specified, the fallback VID 0xC0DE is also scanned.
+/// When neither --vid nor --pid was specified, the fallback VIDs 0xC0DE and 0xC001 are also scanned.
 fn resolve_port(
     port_override: Option<String>,
     vid: Option<u16>,
@@ -225,7 +334,7 @@ fn resolve_port(
     attach::find_serial_port(vid, pid).ok_or({
         match vid {
             None => anyhow::anyhow!(
-                "No serial port found for VID 0x2E8A (default) or VID 0xC0DE (fallback). \
+                "No serial port found for VID 0x2E8A (default) or VID 0xC0DE/0xC001 (fallback). \
                  Is the device connected and running firmware?"
             ),
             Some(v) => anyhow::anyhow!(

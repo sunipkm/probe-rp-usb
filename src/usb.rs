@@ -47,9 +47,9 @@ const PRODUCT_ID_RP_USBBOOT: u16 = 0x000F;
 pub const DEFAULT_VID: u16 = 0x2E8A;
 pub const DEFAULT_PID: u16 = 0x0009;
 
-/// Fallback VID probed when the user does not explicitly specify `--vid`.
-/// Any device advertising this vendor ID is eligible for a reset attempt.
-pub const FALLBACK_VID: u16 = 0xC0DE;
+/// Fallback VIDs probed when the user does not explicitly specify `--vid`.
+/// Any device advertising one of these vendor IDs is eligible for a reset attempt.
+pub const FALLBACK_VIDS: &[u16] = &[0xC0DE, 0xC001];
 
 // Pico USB reset interface constants (from pico-sdk usb_reset_interface.h)
 const RESET_INTERFACE_SUBCLASS: u8 = 0x00;
@@ -235,7 +235,7 @@ fn reboot_via_picoboot(info: &DeviceInfo) -> Result<()> {
 /// 1. App-mode device at `vid`/`pid` → USB reset interface.
 /// 2. Same `vid` + USBBOOT PID `0x000F` → PICOBOOT `PC_REBOOT2`.
 /// 3. If `vid` was **not** specified by the caller, also scan for any device
-///    with VID `0xC0DE` and attempt the reset interface on it.
+///    with a fallback VID (`0xC0DE`, `0xC001`) and attempt the reset interface.
 pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
@@ -258,20 +258,23 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         return reboot_via_picoboot(&info);
     }
 
-    // When the caller did not pin a specific VID, also probe the fallback vendor.
-    if vid.is_none()
-        && let Some(info) = find_any_device_with_vid(FALLBACK_VID)
-    {
-        log::info!(
-            "Primary device not found; trying fallback {:04x}:{:04x}",
-            info.vendor_id(),
-            info.product_id()
-        );
-        return reboot_via_reset_interface(&info);
+    // When the caller did not pin a specific VID, also probe the fallback vendors.
+    if vid.is_none() {
+        for &fvid in FALLBACK_VIDS {
+            if let Some(info) = find_any_device_with_vid(fvid) {
+                log::info!(
+                    "Primary device not found; trying fallback {:04x}:{:04x}",
+                    info.vendor_id(),
+                    info.product_id()
+                );
+                return reboot_via_reset_interface(&info);
+            }
+        }
     }
 
     let fallback_hint = if vid.is_none() {
-        format!(" or any device with VID {:04x}", FALLBACK_VID)
+        let vids: Vec<String> = FALLBACK_VIDS.iter().map(|v| format!("{v:04x}")).collect();
+        format!(" or any device with VID {}", vids.join("/"))
     } else {
         String::new()
     };

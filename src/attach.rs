@@ -6,7 +6,7 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VID};
+use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VIDS};
 
 /// Return a sort key that orders port names naturally, treating a trailing digit
 /// run as a number.  This ensures "COM10" sorts after "COM3" on Windows, and
@@ -96,15 +96,17 @@ pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Option<String> {
         return Some(port);
     }
 
-    // 3. Fallback VID.
-    if vid.is_none()
-        && let Some(port) = find_port_by_vid_pid(FALLBACK_VID, None)
-    {
-        log::info!(
-            "Primary serial port not found; using fallback VID {:04x}",
-            FALLBACK_VID
-        );
-        return Some(port);
+    // 3. Fallback VIDs.
+    if vid.is_none() {
+        for &fvid in FALLBACK_VIDS {
+            if let Some(port) = find_port_by_vid_pid(fvid, None) {
+                log::info!(
+                    "Primary serial port not found; using fallback VID {:04x}",
+                    fvid
+                );
+                return Some(port);
+            }
+        }
     }
 
     None
@@ -206,12 +208,14 @@ pub fn watch(
                     let pid_str = pid
                         .map(|p| format!("PID {:04x}", p))
                         .unwrap_or_else(|| "any PID".into());
+                    let fallback_str: Vec<String> =
+                        FALLBACK_VIDS.iter().map(|v| format!("{v:04x}")).collect();
                     eprintln!(
                         "Timed out waiting for serial port \
-                         (VID {:04x} {} / fallback VID {:04x}) — retrying",
+                         (VID {:04x} {} / fallback VID {}) — retrying",
                         vid.unwrap_or(DEFAULT_VID),
                         pid_str,
-                        FALLBACK_VID,
+                        fallback_str.join("/"),
                     );
                     continue;
                 }

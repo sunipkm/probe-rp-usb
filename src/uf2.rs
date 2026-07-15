@@ -1,6 +1,65 @@
 use anyhow::Result;
 use std::io::{Read, Write};
 
+/// Re-numbers every 512-byte UF2 block in `data` in-place.
+///
+/// After combining several independent UF2 byte buffers (each with their own
+/// block numbering) into one, call this to stamp the correct sequential
+/// `block_no` (starting at `start_block`) and the global `num_blocks` count
+/// across all blocks.
+pub fn renumber_blocks(data: &mut [u8], start_block: u32, num_blocks: u32) {
+    for (i, block) in data.chunks_exact_mut(512).enumerate() {
+        let block_no = start_block + i as u32;
+        block[20..24].copy_from_slice(&block_no.to_le_bytes());
+        block[24..28].copy_from_slice(&num_blocks.to_le_bytes());
+    }
+}
+
+/// Merges a list of `(base_address, data)` raw binary regions into a single
+/// contiguous flat buffer.
+///
+/// Regions are sorted by address.  Any gaps between them are filled with
+/// `fill_byte` (typically `0xff` to match erased flash).  Returns
+/// `(merged_base_address, merged_data)`.
+///
+/// Returns an error if any two regions overlap.
+pub fn merge_regions(
+    mut regions: Vec<(u32, Vec<u8>)>,
+    fill_byte: u8,
+) -> anyhow::Result<(u32, Vec<u8>)> {
+    anyhow::ensure!(!regions.is_empty(), "no binary regions to merge");
+
+    regions.sort_by_key(|(addr, _)| *addr);
+
+    // Detect overlaps between adjacent (sorted) regions.
+    for w in regions.windows(2) {
+        let (addr_a, data_a) = &w[0];
+        let (addr_b, _) = &w[1];
+        let end_a = addr_a
+            .checked_add(data_a.len() as u32)
+            .ok_or_else(|| anyhow::anyhow!("address overflow in region at 0x{addr_a:08x}"))?;
+        anyhow::ensure!(
+            *addr_b >= end_a,
+            "overlapping binary regions: 0x{addr_a:08x}..0x{end_a:08x} and 0x{addr_b:08x}"
+        );
+    }
+
+    let base = regions[0].0;
+    let (last_addr, last_data) = regions.last().unwrap();
+    let end = last_addr
+        .checked_add(last_data.len() as u32)
+        .ok_or_else(|| anyhow::anyhow!("address overflow in last region"))?;
+
+    let total_len = (end - base) as usize;
+    let mut buf = vec![fill_byte; total_len];
+    for (addr, data) in &regions {
+        let offset = (addr - base) as usize;
+        buf[offset..offset + data.len()].copy_from_slice(data);
+    }
+
+    Ok((base, buf))
+}
+
 const UF2_MAGIC_START0: u32 = 0x0A324655;
 const UF2_MAGIC_START1: u32 = 0x9E5D5157;
 const UF2_MAGIC_END: u32 = 0x0AB16F30;

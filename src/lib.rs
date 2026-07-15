@@ -18,6 +18,7 @@
 //!     None,  // VID: use default 0x2E8A
 //!     None,  // PID: use default 0x0009
 //!     10,    // BOOTSEL drive timeout (seconds)
+//!     false, // no_wait: wait for device reboot
 //! ).unwrap();
 //! ```
 
@@ -27,3 +28,4 @@ pub mod flash;
 pub mod uf2;
 pub mod ui;
 pub mod usb;
+pub mod write;
