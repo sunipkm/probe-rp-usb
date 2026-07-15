@@ -41,6 +41,7 @@ APP_NAME="probe-rp-usb"
 REPO="sunipkm/probe-rp-usb"
 RELEASES_BASE="https://github.com/$REPO/releases"
 API_LATEST="https://api.github.com/repos/$REPO/releases/latest"
+API_ALL="https://api.github.com/repos/$REPO/releases"
 
 # ── Runtime config (may be overridden by env or CLI flags) ────────────────────
 
@@ -264,18 +265,35 @@ resolve_version() {
     local _tmpfile
     _tmpfile=$(ensure mktemp)
 
-    if ! downloader "$API_LATEST" "$_tmpfile"; then
-        ignore rm -f "$_tmpfile"
-        err "failed to fetch latest release metadata from $API_LATEST"
+    # Try the latest stable release first.
+    if downloader "$API_LATEST" "$_tmpfile" 2>/dev/null; then
+        local _stable_tag
+        _stable_tag=$(grep '"tag_name"' "$_tmpfile" | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+        if [ -n "$_stable_tag" ]; then
+            ignore rm -f "$_tmpfile"
+            echo "$_stable_tag"
+            return
+        fi
     fi
 
+    # No stable release found; fall back to the most recent release
+    # (which may be a pre-release).
+    say "No stable release found; checking for pre-releases…" >&2
+
+    if ! downloader "$API_ALL" "$_tmpfile"; then
+        ignore rm -f "$_tmpfile"
+        err "failed to fetch release metadata from $API_ALL"
+    fi
+
+    # The API returns releases newest-first; grab the first tag_name.
     local _tag
-    _tag=$(grep '"tag_name"' "$_tmpfile" | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
+    _tag=$(grep '"tag_name"' "$_tmpfile" | head -n 1 | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')
     ignore rm -f "$_tmpfile"
 
     if [ -z "$_tag" ]; then
-        err "could not parse tag_name from GitHub API response"
+        err "no releases (stable or pre-release) found for '$REPO'"
     fi
+    say "Using pre-release: $_tag" >&2
     echo "$_tag"
 }
 

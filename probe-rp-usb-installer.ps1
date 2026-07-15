@@ -101,11 +101,32 @@ function Resolve-Version {
         return $RequestedVersion
     }
 
-    Write-Step "Fetching latest release from GitHub…"
-    $url  = "$API_BASE/releases/latest"
-    $json = Invoke-RestMethod -Uri $url -UseBasicParsing `
-                -Headers @{ 'User-Agent' = 'probe-rp-usb-installer' }
-    return $json.tag_name
+    Write-Step "Fetching latest release from GitHub..."
+    $headers = @{ 'User-Agent' = 'probe-rp-usb-installer' }
+
+    # Try the latest stable release first.
+    try {
+        $json = Invoke-RestMethod -Uri "$API_BASE/releases/latest" `
+                    -UseBasicParsing -Headers $headers
+        return $json.tag_name
+    } catch [System.Net.WebException] {
+        $code = if ($null -ne $_.Exception.Response) {
+            [int]$_.Exception.Response.StatusCode
+        } else { 0 }
+        # 404 means no stable release exists; fall through to pre-release search.
+        if ($code -ne 404) { throw }
+    }
+
+    # Fall back to the most recent release (including pre-releases).
+    Write-Step "No stable release found; checking for pre-releases..."
+    $all = Invoke-RestMethod -Uri "$API_BASE/releases" `
+               -UseBasicParsing -Headers $headers
+    $latest = $all | Where-Object { -not $_.draft } | Select-Object -First 1
+    if (-not $latest) {
+        throw "No releases (stable or pre-release) found for '$REPO'."
+    }
+    Write-Step "Using pre-release: $($latest.tag_name)"
+    return $latest.tag_name
 }
 
 # Build the download URL for the archive (and its optional checksum file).
@@ -131,6 +152,7 @@ function Invoke-Download {
             -Headers @{ 'User-Agent' = 'probe-rp-usb-installer' }
         return $true
     } catch [System.Net.WebException] {
+        if ($null -eq $_.Exception.Response) { throw }
         $code = [int]$_.Exception.Response.StatusCode
         if ($code -eq 404) { return $false }
         throw
@@ -289,5 +311,7 @@ try {
     Write-Host "If the problem persists, please open an issue at:"
     Write-Host "  https://github.com/$REPO/issues"
     Write-Host ""
-    exit 1
+    # 'exit' terminates the host process when invoked via 'irm … | iex'.
+    # Only call it when running as a standalone .ps1 file.
+    if ($PSScriptRoot) { exit 1 }
 }

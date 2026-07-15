@@ -24,6 +24,41 @@ all from one command, over the same USB cable that powers the board.
   `probe-rs run`, but over USB only)
 
 ## Installation
+
+### Using the installer script (pre-built binary)
+
+**Linux / macOS:**
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/sunipkm/probe-rp-usb/releases/latest/download/probe-rp-usb-installer.sh \
+  | sh
+```
+
+Options can be passed via environment variables or flags:
+
+| Option | Description |
+|--------|-------------|
+| `--version <tag>` | Install a specific release tag (e.g. `v0.2.0`) |
+| `--no-modify-path` | Skip adding the binary to `PATH` |
+| `--verbose` / `--quiet` | Control output verbosity |
+
+Environment overrides: `PROBE_RP_USB_VERSION`, `PROBE_RP_USB_INSTALL_DIR`, `INSTALLER_NO_MODIFY_PATH`.
+
+**Windows (PowerShell):**
+
+```powershell
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/sunipkm/probe-rp-usb/releases/latest/download/probe-rp-usb-installer.ps1 | iex"
+```
+
+To install a specific version or a custom directory:
+
+```powershell
+.\probe-rp-usb-installer.ps1 -Version "v0.2.0" -InstallDir "$env:ProgramFiles\probe-rp-usb"
+```
+
+### Using cargo
+
 ```sh
 cargo install probe-rp-usb
 ```
