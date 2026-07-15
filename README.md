@@ -176,10 +176,12 @@ with an error.
 an Embassy-based RP2xxx firmware template that provides all the USB
 interfaces `probe-rp-usb` relies on:
 
-- **Port 0** — interactive command shell
-- **Port 1** — `defmt` log sink (binary CDC-ACM frames)
+- **Port 0** — interactive command shell (*not required*)
+- **Port 1** — `defmt` log sink (binary CDC-ACM frames, **required**)
 - **Vendor reset interface** — allows `probe-rp-usb reset` / `flash` /
   `run` to reboot into BOOTSEL without the button
 
 Derive your own firmware from that template and the whole
-flash &rarr; log &rarr; reflash cycle works over the single USB cable.
+flash &rarr; log &rarr; reflash cycle works over the single USB cable
+without needing to press the BOOTSEL button or resetting
+the system.

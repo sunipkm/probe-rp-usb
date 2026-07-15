@@ -126,11 +126,11 @@ fn load_table(elf_path: &Path) -> Result<Table> {
 /// Returns when the serial port closes/errors.  `DecodeError::UnexpectedEof` signals that
 /// more bytes are needed (normal); `DecodeError::Malformed` is handled based on the
 /// encoding's recovery capability.
-fn run_decode_loop(table: &Table, port_name: &str) -> Result<()> {
+fn run_decode_loop(table: &Table, port_name: &str, baud: u32, read_timeout_ms: u64) -> Result<()> {
     let mut decoder = table.new_stream_decoder();
 
-    let mut port = serialport::new(port_name, 115200)
-        .timeout(Duration::from_millis(100))
+    let mut port = serialport::new(port_name, baud)
+        .timeout(Duration::from_millis(read_timeout_ms))
         .open()
         .with_context(|| format!("Failed to open serial port {}", port_name))?;
 
@@ -144,7 +144,7 @@ fn run_decode_loop(table: &Table, port_name: &str) -> Result<()> {
                 drain_frames(&mut *decoder, table)?;
             }
             Err(ref e) if e.kind() == ErrorKind::TimedOut => {
-                // No data in this 100 ms window — normal.
+                // No data in this read_timeout_ms window — normal.
             }
             Err(e) => {
                 return Err(anyhow::Error::from(e).context("Serial read error"));
@@ -177,10 +177,10 @@ fn drain_frames(decoder: &mut dyn StreamDecoder, table: &Table) -> Result<()> {
 }
 
 /// Attach to the serial port and decode defmt output.  Exits when the port is closed or on error.
-pub fn attach(elf_path: &Path, port_name: &str) -> Result<()> {
+pub fn attach(elf_path: &Path, port_name: &str, baud: u32, read_timeout_ms: u64) -> Result<()> {
     let table = load_table(elf_path)?;
     println!("Attached to {} (Ctrl+C to quit)", port_name);
-    run_decode_loop(&table, port_name)
+    run_decode_loop(&table, port_name, baud, read_timeout_ms)
 }
 
 /// Like `attach`, but reconnects automatically whenever the device disconnects.
@@ -192,6 +192,8 @@ pub fn watch(
     port_override: Option<String>,
     vid: Option<u16>,
     pid: Option<u16>,
+    baud: u32,
+    read_timeout_ms: u64,
 ) -> Result<()> {
     let table = load_table(elf_path)?;
 
@@ -218,7 +220,7 @@ pub fn watch(
 
         println!("Connecting to {}...", port_name);
 
-        match run_decode_loop(&table, &port_name) {
+        match run_decode_loop(&table, &port_name, baud, read_timeout_ms) {
             Ok(()) => break,
             Err(e) => {
                 eprintln!("Disconnected: {:#}", e);

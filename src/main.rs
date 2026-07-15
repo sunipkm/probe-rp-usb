@@ -47,6 +47,14 @@ struct Cli {
     #[arg(long, global = true, default_value = "10")]
     bootsel_timeout: u64,
 
+    /// Serial port baud rate used for defmt output.
+    #[arg(long, global = true, default_value = "115200")]
+    baud: u32,
+
+    /// Serial read timeout in milliseconds (how long to wait for data before polling again).
+    #[arg(long, global = true, default_value = "100")]
+    read_timeout_ms: u64,
+
     #[command(subcommand)]
     command: Cmd,
 }
@@ -158,11 +166,11 @@ fn run(cli: Cli) -> Result<()> {
 
         Cmd::Attach { elf, port } => {
             let port = resolve_port(port, cli.vid, cli.pid)?;
-            attach::attach(&elf, &port)?;
+            attach::attach(&elf, &port, cli.baud, cli.read_timeout_ms)?;
         }
 
         Cmd::Watch { elf, port } => {
-            attach::watch(&elf, port, cli.vid, cli.pid)?;
+            attach::watch(&elf, port, cli.vid, cli.pid, cli.baud, cli.read_timeout_ms)?;
         }
 
         Cmd::Run {
@@ -179,7 +187,14 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.bootsel_timeout,
             )?;
-            attach::watch(&input, port, cli.vid, cli.pid)?;
+            attach::watch(
+                &input,
+                port,
+                cli.vid,
+                cli.pid,
+                cli.baud,
+                cli.read_timeout_ms,
+            )?;
         }
     }
 
