@@ -172,8 +172,8 @@ with an error.
 
 ## Companion firmware
 
-[chickadee-rp2350-base](https://github.com/sunipkm/chickadee-rp2350-base) is
-an Embassy-based RP235xA/B firmware template that provides all the USB
+[embassy-rp-base](https://github.com/sunipkm/embassy-rp-base) is
+an Embassy-based RP2xxx firmware template that provides all the USB
 interfaces `probe-rp-usb` relies on:
 
 - **Port 0** — interactive command shell
