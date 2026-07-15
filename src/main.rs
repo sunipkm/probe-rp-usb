@@ -27,6 +27,7 @@ fn parse_u32_hex(s: &str) -> Result<u32, String> {
 #[derive(Parser)]
 #[command(
     name = "probe-rp-usb",
+    version = option_env!("VERGEN_GIT_DESCRIBE").unwrap_or(env!("CARGO_PKG_VERSION")),
     about = "RP2040/RP2350 flashing and defmt debug tool",
     long_about = None,
 )]
