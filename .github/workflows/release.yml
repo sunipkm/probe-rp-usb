@@ -1,0 +1,50 @@
+# Publish a GitHub Release.
+#
+# Triggered by pushing a version tag (e.g. `git tag v0.1.0 && git push --tags`).
+# Delegates all compilation to build.yml via workflow_call, then collects the
+# uploaded artifacts and attaches them to the release.
+
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v[0-9]*'
+
+jobs:
+  # ── Build all targets (reuses build.yml — no matrix duplication) ─────────────
+  build:
+    uses: ./.github/workflows/build.yml
+
+  # ── Create GitHub Release and upload all assets ──────────────────────────────
+  release:
+    name: GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: List release assets
+        run: find dist -type f | sort
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          generate_release_notes: true
+          files: |
+            dist/*
+            probe-rp-usb-installer.sh
+            probe-rp-usb-installer.ps1
+            99-probe-rp-usb.rules

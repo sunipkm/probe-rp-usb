@@ -1,0 +1,130 @@
+# Build all release targets.
+#
+# Runs on every branch push and pull request so compilation failures are caught
+# early.  Also declared as a reusable workflow (`workflow_call`) so that
+# release.yml can invoke it on a tag push and then consume the uploaded
+# artifacts to publish the GitHub Release — without duplicating the matrix.
+
+name: Build
+
+on:
+  pull_request:
+  workflow_dispatch:
+  workflow_call:       # called by release.yml
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  BIN: probe-rp-usb
+
+jobs:
+  build:
+    name: Build · ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: false
+            ext: tar.xz
+
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            cross: true        # uses `cross` + Cross.toml for libudev
+            ext: tar.xz
+
+          - target: x86_64-apple-darwin
+            os: macos-13       # last Intel GitHub runner
+            cross: false
+            ext: tar.xz
+
+          - target: aarch64-apple-darwin
+            os: macos-latest   # Apple Silicon runner
+            cross: false
+            ext: tar.xz
+
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+            ext: zip
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      # Cache the cargo registry and any git checkouts (including elf2uf2-core).
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
+
+      # Native Linux build only — cross handles its own sysroot.
+      - name: Install libudev-dev (Linux native)
+        if: runner.os == 'Linux' && matrix.cross == false
+        run: sudo apt-get update -q && sudo apt-get install -y libudev-dev
+
+      # Pre-fetch all crates (including git deps) on the host so cross can
+      # find them in the mounted $CARGO_HOME.
+      - name: Fetch dependencies
+        run: cargo fetch --locked
+
+      - name: Install cross
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      # ── Build ────────────────────────────────────────────────────────────────
+
+      - name: Build (cross)
+        if: matrix.cross == true
+        run: cross build --release --locked --target ${{ matrix.target }}
+
+      - name: Build (cargo)
+        if: matrix.cross == false
+        run: cargo build --release --locked --target ${{ matrix.target }}
+
+      # ── Package ──────────────────────────────────────────────────────────────
+
+      - name: Package (tar.xz)
+        if: matrix.ext == 'tar.xz'
+        shell: bash
+        run: |
+          staging="${BIN}-${{ matrix.target }}"
+          mkdir -p "$staging"
+          cp "target/${{ matrix.target }}/release/${BIN}" "$staging/"
+          tar cJf "${staging}.tar.xz" "$staging/"
+          sha256sum "${staging}.tar.xz" | tee "${staging}.tar.xz.sha256"
+
+      - name: Package (zip)
+        if: matrix.ext == 'zip'
+        shell: pwsh
+        run: |
+          $staging = "$env:BIN-${{ matrix.target }}"
+          New-Item -ItemType Directory -Path $staging | Out-Null
+          Copy-Item "target\${{ matrix.target }}\release\$env:BIN.exe" "$staging\"
+          Compress-Archive -Path "$staging" -DestinationPath "$staging.zip"
+          $hash = (Get-FileHash "$staging.zip" -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$staging.zip.sha256" -Value "$hash  $staging.zip" -Encoding ascii
+          Write-Host "$hash  $staging.zip"
+
+      # Artifacts are always uploaded so release.yml can download them when
+      # this workflow is invoked via workflow_call.
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.target }}
+          path: ${{ env.BIN }}-${{ matrix.target }}.${{ matrix.ext }}*
+          if-no-files-found: error
