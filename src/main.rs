@@ -130,6 +130,10 @@ enum Cmd {
         /// mid-transfer.
         #[arg(long)]
         erase_boot: bool,
+
+        /// Do not wait for the device to reboot after writing (leaves device in BOOTSEL mode).
+        #[arg(long)]
+        no_wait: bool,
     },
 
     /// Attach to the device's last serial port and decode defmt output
@@ -188,6 +192,10 @@ enum Cmd {
         /// UF2 family to embed in the UF2 blocks
         #[arg(long, value_enum, default_value = "rp2350-arm-s")]
         family: Family,
+
+        /// Do not wait for the device to reboot after erasing (leaves device in BOOTSEL mode).
+        #[arg(long)]
+        no_wait: bool,
     },
 }
 
@@ -240,6 +248,7 @@ fn run(cli: Cli) -> Result<()> {
             base,
             family,
             erase_boot,
+            no_wait,
         } => {
             let targets: Vec<write::WriteTarget> = targets
                 .into_iter()
@@ -255,6 +264,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.vid,
                 cli.pid,
                 cli.bootsel_timeout,
+                no_wait,
             )?;
         }
 
@@ -296,6 +306,7 @@ fn run(cli: Cli) -> Result<()> {
             flash_size,
             base,
             family,
+            no_wait,
         } => {
             write::erase_flash(
                 flash_size,
@@ -304,6 +315,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.vid,
                 cli.pid,
                 cli.bootsel_timeout,
+                no_wait,
             )?;
         }
     }
