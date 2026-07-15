@@ -1,9 +1,4 @@
-mod attach;
-mod bootsel;
-mod flash;
-mod uf2;
-mod ui;
-mod usb;
+use probe_rp_usb::{attach, bootsel, flash, ui, usb};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};

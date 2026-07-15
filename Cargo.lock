@@ -452,7 +452,7 @@ checksum = "55dd888a213fc57e957abf2aa305ee3e8a28dbe05687a251f33b637cd46b0070"
 [[package]]
 name = "elf2uf2-core"
 version = "2.2.0"
-source = "git+https://github.com/JoNil/elf2uf2-rs#f14bf2d981772cd9fbe5bac33b685719caac1add"
+source = "git+https://github.com/JoNil/elf2uf2-rs?rev=f14bf2d981772cd9fbe5bac33b685719caac1add#f14bf2d981772cd9fbe5bac33b685719caac1add"
 dependencies = [
  "assert_into",
  "clap",
