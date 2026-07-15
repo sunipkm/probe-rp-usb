@@ -3,7 +3,7 @@
 A single-cable flash-and-debug tool for RP2040/RP2350-based devices.
 
 When paired with firmware derived from
-[chickadee-rp2350-base](https://github.com/sunipkm/chickadee-rp2350-base),
+[embassy-rp-base](https://github.com/sunipkm/embassy-rp-base),
 a single USB cable is all you need — no debug probe, no J-Link, no SWD wires.
 The firmware exposes a vendor reset interface (so the host can reboot the device
 into BOOTSEL mode on demand) and routes `defmt` log output over a second USB
