@@ -596,7 +596,7 @@ Make sure release ${_version} has a build for target ${_arch}."
     if [ "$NO_MODIFY_PATH" = "0" ]; then
         modify_path "$_install_dir"
     else
-        if [ "$INSTALLER_NO_MODIFY_PATH" = "1" ] || [ "$NO_MODIFY_PATH" = "1" ]; then
+        if [ "${INSTALLER_NO_MODIFY_PATH:-}" = "1" ] || [ "$NO_MODIFY_PATH" = "1" ]; then
             say ""
             say "PATH modification skipped."
             say "Add this to your shell profile to use ${APP_NAME}:"

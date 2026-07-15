@@ -35,6 +35,14 @@ curl --proto '=https' --tlsv1.2 -LsSf \
   | sh
 ```
 
+Or with `wget`:
+
+```sh
+wget -qO- \
+  https://github.com/sunipkm/probe-rp-usb/releases/latest/download/probe-rp-usb-installer.sh \
+  | sh
+```
+
 Options can be passed via environment variables or flags:
 
 | Option | Description |
