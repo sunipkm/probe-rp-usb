@@ -1,11 +1,35 @@
 use anyhow::{Context, Result};
 use elf2uf2_core::Family;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
-use std::io::{BufReader, Read, Seek, SeekFrom};
+use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::{bootsel, uf2, usb};
+use crate::{bootsel, uf2, ui, usb};
+
+// ---------------------------------------------------------------------------
+// Progress-reporting writer
+// ---------------------------------------------------------------------------
+
+/// Wraps any `Write` implementation and advances a `ProgressBar` with every
+/// byte written, so callers need not know about progress reporting.
+struct ProgressWriter<W: Write> {
+    inner: W,
+    bar: ProgressBar,
+}
+
+impl<W: Write> Write for ProgressWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.bar.inc(n as u64);
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -27,6 +51,7 @@ pub fn flash(
     base_addr: u32,
     vid: Option<u16>,
     pid: Option<u16>,
+    bootsel_timeout_secs: u64,
 ) -> Result<()> {
     let mount = match bootsel::find_bootsel_drive() {
         Some(m) => {
@@ -40,16 +65,17 @@ pub fn flash(
                 pid.unwrap_or(usb::DEFAULT_PID),
             );
             usb::reset_to_bootsel(vid, pid)?;
-            println!("Reset sent. Waiting for BOOTSEL drive...");
-            let m = bootsel::wait_for_bootsel_drive(Duration::from_secs(10))?;
-            println!("BOOTSEL drive mounted at: {}", m.display());
+            let spin = ui::spinner("Waiting for BOOTSEL drive…");
+            let m = bootsel::wait_for_bootsel_drive(Duration::from_secs(bootsel_timeout_secs))
+                .inspect_err(|_| spin.abandon())?;
+            spin.finish_with_message(format!("BOOTSEL drive: {}", m.display()));
             m
         }
     };
 
     let out_path = mount.join("out.uf2");
-    let out_file =
-        File::create(&out_path).with_context(|| format!("Failed to create {}", out_path.display()))?;
+    let out_file = File::create(&out_path)
+        .with_context(|| format!("Failed to create {}", out_path.display()))?;
 
     let mut in_file = File::open(input_path)
         .with_context(|| format!("Failed to open input file {}", input_path.display()))?;
@@ -59,27 +85,95 @@ pub fn flash(
         .seek(SeekFrom::Start(0))
         .context("Failed to rewind input file")?;
 
-    let result = if elf_input {
-        log::info!("ELF input detected — converting via elf2uf2-core (family {:?})", family);
-        elf2uf2_core::elf2uf2(BufReader::new(in_file), out_file, family)
-            .map_err(anyhow::Error::from)
+    // For inputs under 16 MiB, convert the entire UF2 into a Vec<u8> first so
+    // the exact byte count is known before any write starts.  This gives a
+    // determinate progress bar with a reliable ETA.  Inputs at or above the
+    // threshold are streamed directly to avoid excessive memory use (spinner).
+    const IN_MEMORY_THRESHOLD: u64 = 16 * 1024 * 1024;
+    let file_size = in_file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+
+    let write_result: Result<()> = if file_size < IN_MEMORY_THRESHOLD {
+        // --- In-memory path: convert fully, then write with exact byte count ---
+        let mut buf: Vec<u8> = Vec::new();
+        let convert = if elf_input {
+            log::info!("ELF → UF2 (in-memory, family {:?})", family);
+            elf2uf2_core::elf2uf2(BufReader::new(in_file), &mut buf, family)
+                .map_err(anyhow::Error::from)
+        } else {
+            log::info!(
+                "Raw binary → UF2 (in-memory, base 0x{:08x}, family {:?})",
+                base_addr,
+                family
+            );
+            uf2::bin2uf2(in_file, &mut buf, base_addr, family as u32)
+        };
+        match convert {
+            Err(e) => Err(e.context("UF2 conversion failed")),
+            Ok(()) => {
+                let bar = ProgressBar::new(buf.len() as u64);
+                bar.set_style(
+                    ProgressStyle::with_template(
+                        "  Writing UF2  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
+                    )
+                    .unwrap()
+                    .progress_chars("█▉▊▋▌▍▎▏ "),
+                );
+                let mut pw = ProgressWriter {
+                    inner: out_file,
+                    bar: bar.clone(),
+                };
+                let r = pw
+                    .write_all(&buf)
+                    .context("Failed to write UF2 to BOOTSEL drive");
+                if r.is_err() {
+                    bar.abandon_with_message("Write failed");
+                } else {
+                    bar.finish_with_message("UF2 written");
+                }
+                r
+            }
+        }
     } else {
-        log::info!(
-            "Raw binary input detected — converting via bin2uf2 (base 0x{:08x}, family {:?})",
-            base_addr,
-            family
+        // --- Streaming path: output size unknown, show spinner with byte count ---
+        let bar = ProgressBar::new_spinner();
+        bar.enable_steady_tick(Duration::from_millis(80));
+        bar.set_style(
+            ProgressStyle::with_template("{spinner:.cyan} Writing UF2… {bytes}")
+                .unwrap()
+                .tick_strings(ui::tick_chars()),
         );
-        uf2::bin2uf2(in_file, out_file, base_addr, family as u32)
+        let pw = ProgressWriter {
+            inner: out_file,
+            bar: bar.clone(),
+        };
+        let r = if elf_input {
+            log::info!("ELF → UF2 (streaming, family {:?})", family);
+            elf2uf2_core::elf2uf2(BufReader::new(in_file), pw, family).map_err(anyhow::Error::from)
+        } else {
+            log::info!(
+                "Raw binary → UF2 (streaming, base 0x{:08x}, family {:?})",
+                base_addr,
+                family
+            );
+            uf2::bin2uf2(in_file, pw, base_addr, family as u32)
+        };
+        if r.is_err() {
+            bar.abandon_with_message("Write failed");
+        } else {
+            bar.finish_with_message("UF2 written");
+        }
+        r
     };
 
-    if let Err(e) = result {
+    if let Err(e) = write_result {
         let _ = fs::remove_file(&out_path);
         return Err(e.context("Flash failed; partial UF2 file removed"));
     }
 
-    println!("UF2 written. Waiting for device to reboot...");
+    let spin = ui::spinner("Waiting for device to reboot…");
     bootsel::wait_for_bootsel_unmount(Duration::from_secs(15))
+        .inspect_err(|_| spin.abandon())
         .context("Device did not unmount BOOTSEL drive after flashing")?;
-    println!("Flash complete.");
+    spin.finish_with_message("Flash complete");
     Ok(())
 }

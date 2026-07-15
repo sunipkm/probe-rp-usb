@@ -30,7 +30,14 @@ pub fn bin2uf2(
 
     for (block_no, chunk) in data.chunks(UF2_PAYLOAD_SIZE as usize).enumerate() {
         let target_addr = base_addr + (block_no as u32) * UF2_PAYLOAD_SIZE;
-        write_block(&mut output, target_addr, chunk, block_no as u32, num_blocks, family_id)?;
+        write_block(
+            &mut output,
+            target_addr,
+            chunk,
+            block_no as u32,
+            num_blocks,
+            family_id,
+        )?;
     }
 
     Ok(())

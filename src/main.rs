@@ -2,6 +2,7 @@ mod attach;
 mod bootsel;
 mod flash;
 mod uf2;
+mod ui;
 mod usb;
 
 use anyhow::Result;
@@ -30,7 +31,7 @@ fn parse_u32_hex(s: &str) -> Result<u32, String> {
 
 #[derive(Parser)]
 #[command(
-    name = "chickadee-probe",
+    name = "probe-rp-usb",
     about = "RP2040/RP2350 flashing and defmt debug tool",
     long_about = None,
 )]
@@ -46,6 +47,10 @@ struct Cli {
     /// 0xC0DE fallback scan accepts any PID.
     #[arg(long, global = true, value_parser = parse_u16_hex)]
     pid: Option<u16>,
+
+    /// Seconds to wait for the BOOTSEL drive to appear after a reset.
+    #[arg(long, global = true, default_value = "10")]
+    bootsel_timeout: u64,
 
     #[command(subcommand)]
     command: Cmd,
@@ -114,10 +119,19 @@ enum Cmd {
     },
 }
 
-fn main() -> Result<()> {
+fn main() {
     env_logger::init();
-    let cli = Cli::parse();
+    if let Err(e) = run(Cli::parse()) {
+        eprintln!("Error: {e:?}");
+        #[cfg(target_os = "linux")]
+        if is_permission_error(&e) {
+            eprintln!("\n{}", usb::udev_hint());
+        }
+        std::process::exit(1);
+    }
+}
 
+fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Cmd::Check => match bootsel::find_bootsel_drive() {
             Some(path) => println!("{}", path.display()),
@@ -126,9 +140,10 @@ fn main() -> Result<()> {
 
         Cmd::Reset => {
             usb::reset_to_bootsel(cli.vid, cli.pid)?;
-            println!("Reset sent. Waiting for BOOTSEL drive...");
-            let path = bootsel::wait_for_bootsel_drive(Duration::from_secs(10))?;
-            println!("BOOTSEL drive mounted at: {}", path.display());
+            let spin = ui::spinner("Waiting for BOOTSEL drive…");
+            let path = bootsel::wait_for_bootsel_drive(Duration::from_secs(cli.bootsel_timeout))
+                .inspect_err(|_| spin.abandon())?;
+            spin.finish_with_message(format!("BOOTSEL drive: {}", path.display()));
         }
 
         Cmd::Flash {
@@ -136,7 +151,14 @@ fn main() -> Result<()> {
             family,
             address,
         } => {
-            flash::flash(&input, family, address, cli.vid, cli.pid)?;
+            flash::flash(
+                &input,
+                family,
+                address,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
+            )?;
         }
 
         Cmd::Attach { elf, port } => {
@@ -154,12 +176,29 @@ fn main() -> Result<()> {
             address,
             port,
         } => {
-            flash::flash(&input, family, address, cli.vid, cli.pid)?;
+            flash::flash(
+                &input,
+                family,
+                address,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
+            )?;
             attach::watch(&input, port, cli.vid, cli.pid)?;
         }
     }
 
     Ok(())
+}
+
+/// Return `true` when any error in the chain looks like a USB/serial permission denial.
+/// Used on Linux to decide whether to print the udev setup hint.
+#[cfg(target_os = "linux")]
+fn is_permission_error(e: &anyhow::Error) -> bool {
+    e.chain().any(|cause| {
+        let msg = cause.to_string();
+        msg.contains("Permission denied") || msg.contains("Access denied")
+    })
 }
 
 /// Resolve the serial port: use the override if provided, else auto-detect by VID/PID.

@@ -5,6 +5,41 @@ use nusb::{DeviceInfo, MaybeFuture};
 use std::io::{Read, Write};
 use std::time::Duration;
 
+/// USB class/subclass for CDC Abstract Control Model (serial) interfaces.
+const CDC_CLASS: u8 = 0x02;
+const CDC_SUBCLASS_ACM: u8 = 0x02;
+
+/// USB language ID for US-English string descriptors.
+const LANG_EN_US: u16 = 0x0409;
+
+// ---------------------------------------------------------------------------
+// Linux udev hint (embedded at compile time so `cargo install` users get it)
+// ---------------------------------------------------------------------------
+
+/// Contents of the bundled udev rules file, compiled into the binary.
+#[cfg(target_os = "linux")]
+const UDEV_RULES: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/99-probe-rp-usb.rules"
+));
+
+/// Human-readable setup hint shown when a USB permission error is detected on Linux.
+#[cfg(target_os = "linux")]
+pub fn udev_hint() -> String {
+    format!(
+        "Hint: install the udev rules to grant non-root USB access, then reload:\n\
+         \n\
+         sudo tee /etc/udev/rules.d/99-probe-rp-usb.rules << 'EOF'\n\
+         {UDEV_RULES}\
+         EOF\n\
+         sudo udevadm control --reload-rules && sudo udevadm trigger\n\
+         \n\
+         Also ensure your user is in the required groups (log out and in to apply):\n\
+         sudo usermod -aG plugdev $USER    # USB device access\n\
+         sudo usermod -aG dialout $USER    # serial port access"
+    )
+}
+
 /// BOOTSEL (USB boot ROM) product ID — same for all RP-series chips.
 const PRODUCT_ID_RP_USBBOOT: u16 = 0x000F;
 
@@ -33,6 +68,50 @@ pub fn find_device(vid: u16, pid: u16) -> Option<DeviceInfo> {
         .wait()
         .ok()?
         .find(|d| d.vendor_id() == vid && d.product_id() == pid)
+}
+
+/// Inspect the active USB configuration of the device at `vid`/`pid` and find
+/// the CDC-ACM control interface whose `iInterface` string descriptor contains
+/// "defmt" (case-insensitive).
+///
+/// Returns `(control_interface_num, data_interface_num)` on success.  The data
+/// interface is assumed to be `control_interface_num + 1`, which matches the
+/// standard CDC-ACM pairing used by Embassy and the pico-sdk.
+///
+/// Returns `None` when the device is not found, cannot be opened (e.g. no
+/// WinUSB driver on Windows), sets no `iInterface` strings, or has no
+/// interface labelled "defmt" — the caller should fall back to the port-name
+/// heuristic in that case.
+pub fn find_defmt_interface(vid: u16, pid: u16) -> Option<(u8, u8)> {
+    let device = find_device(vid, pid)?.open().wait().ok()?;
+    let config = device.active_configuration().ok()?;
+
+    for iface in config.interface_alt_settings() {
+        // Only examine CDC Control (ACM) interfaces — class 0x02, subclass 0x02.
+        if iface.class() != CDC_CLASS || iface.subclass() != CDC_SUBCLASS_ACM {
+            continue;
+        }
+        let ctrl_num = iface.interface_number();
+        let Some(str_idx) = iface.string_index() else {
+            continue;
+        };
+        let Ok(label) = device
+            .get_string_descriptor(str_idx, LANG_EN_US, Duration::from_millis(500))
+            .wait()
+        else {
+            continue;
+        };
+        if label.to_ascii_lowercase().contains("defmt") {
+            log::info!(
+                "defmt CDC interface identified via string descriptor: \
+                 control={ctrl_num} data={} (\"{}\")",
+                ctrl_num + 1,
+                label,
+            );
+            return Some((ctrl_num, ctrl_num + 1));
+        }
+    }
+    None
 }
 
 /// Find the first USB device with the given VID, regardless of PID.

@@ -6,7 +6,45 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::usb::{DEFAULT_PID, DEFAULT_VID, FALLBACK_VID};
+use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VID};
+
+/// Return a sort key that orders port names naturally, treating a trailing digit
+/// run as a number.  This ensures "COM10" sorts after "COM3" on Windows, and
+/// "/dev/ttyACM10" after "/dev/ttyACM2" on Linux.
+fn port_sort_key(name: &str) -> (String, u64) {
+    let split = name.len()
+        - name
+            .as_bytes()
+            .iter()
+            .rev()
+            .take_while(|b| b.is_ascii_digit())
+            .count();
+    let (prefix, num_str) = name.split_at(split);
+    (prefix.to_lowercase(), num_str.parse().unwrap_or(0))
+}
+
+/// Find the serial port for a specific USB CDC interface by matching the
+/// interface number reported by the OS.
+///
+/// `ctrl` is the CDC Control interface number; `data` is the CDC Data interface
+/// number (always `ctrl + 1`).  Windows and Linux report the *control* number;
+/// macOS reports the *data* number.  Accepting both makes this function
+/// platform-agnostic.
+fn find_port_by_interface(vid: u16, pid: u16, ctrl: u8, data: u8) -> Option<String> {
+    serialport::available_ports()
+        .ok()?
+        .into_iter()
+        .find_map(|p| {
+            if let SerialPortType::UsbPort(info) = p.port_type
+                && info.vid == vid
+                && info.pid == pid
+                && matches!(info.interface, Some(n) if n == ctrl || n == data)
+            {
+                return Some(p.port_name);
+            }
+            None
+        })
+}
 
 /// Scan available serial ports, filter by VID and (optionally) PID, sort by name, return last.
 fn find_port_by_vid_pid(vid: u16, pid: Option<u16>) -> Option<String> {
@@ -24,28 +62,50 @@ fn find_port_by_vid_pid(vid: u16, pid: Option<u16>) -> Option<String> {
             None
         })
         .collect();
-    ports.sort();
+    ports.sort_by_key(|p| port_sort_key(p));
     ports.into_iter().last()
 }
 
-/// Find the last serial port matching the given VID/PID.
+/// Find the serial port for defmt output, using the most specific method available.
 ///
-/// When `vid` is `None` (user did not specify `--vid`):
-/// 1. Try the default RPI VID `0x2E8A` with the default/given PID.
-/// 2. Fall back to any port with VID `0xC0DE` (any PID).
+/// Discovery order:
+/// 1. **Interface string descriptor** (robust): open the USB device, find the
+///    CDC-ACM interface whose `iInterface` string contains "defmt", and return
+///    the OS serial-port name bound to that exact interface.  Requires the
+///    firmware to label the interface (e.g. `iInterface = "defmt"`) and, on
+///    Windows, the WinUSB driver to be installed for the device.
+/// 2. **VID/PID heuristic** (fallback): pick the highest-numbered serial port
+///    matching the given VID/PID by natural sort.  Works without string
+///    descriptors but relies on the defmt port being the last enumerated one.
+/// 3. **Fallback VID `0xC0DE`** (fallback, only when `--vid` is not set).
 pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Option<String> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
+    // 1. Interface string descriptor — precise, platform-agnostic.
+    if let Some((ctrl, data)) = usb::find_defmt_interface(primary_vid, primary_pid)
+        && let Some(port) = find_port_by_interface(primary_vid, primary_pid, ctrl, data)
+    {
+        return Some(port);
+    }
+    // Descriptor found but port not yet visible (device still enumerating) —
+    // fall through so the heuristic can retry on the next poll cycle.
+
+    // 2. VID/PID heuristic.
     if let Some(port) = find_port_by_vid_pid(primary_vid, Some(primary_pid)) {
         return Some(port);
     }
 
+    // 3. Fallback VID.
     if vid.is_none()
-        && let Some(port) = find_port_by_vid_pid(FALLBACK_VID, None) {
-            log::info!("Primary serial port not found; using fallback VID {:04x}", FALLBACK_VID);
-            return Some(port);
-        }
+        && let Some(port) = find_port_by_vid_pid(FALLBACK_VID, None)
+    {
+        log::info!(
+            "Primary serial port not found; using fallback VID {:04x}",
+            FALLBACK_VID
+        );
+        return Some(port);
+    }
 
     None
 }
@@ -56,7 +116,9 @@ fn load_table(elf_path: &Path) -> Result<Table> {
         .with_context(|| format!("Failed to read ELF: {}", elf_path.display()))?;
     Table::parse(&elf_bytes)
         .context("Failed to parse defmt table from ELF")?
-        .ok_or_else(|| anyhow::anyhow!("ELF file contains no .defmt section — was it built with defmt?"))
+        .ok_or_else(|| {
+            anyhow::anyhow!("ELF file contains no .defmt section — was it built with defmt?")
+        })
 }
 
 /// Open `port_name`, feed received bytes through the `StreamDecoder`, and print decoded frames.

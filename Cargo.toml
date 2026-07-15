@@ -1,19 +1,21 @@
 [package]
-name = "chickadee-probe"
+name = "probe-rp-usb"
 version = "0.0.1"
 edition = "2024"
 
 [[bin]]
-name = "chickadee-probe"
+name = "probe-rp-usb"
 path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
+indicatif = "0.18"
 defmt-decoder = "1.1"
 elf2uf2-core = { git = "https://github.com/JoNil/elf2uf2-rs", features = ["clap"] }
 env_logger = "0.11"
 log = "0.4"
 nusb = { version = "0.2.3", features = ["smol"] }
-serialport = "4"
+serialport = { version = "4", features = ["usbportinfo-interface"] }
 sysinfo = "0.32"
+supports-unicode = "3.0.0"
