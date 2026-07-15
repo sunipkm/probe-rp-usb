@@ -1,9 +1,8 @@
 # Build all release targets.
 #
-# Runs on every branch push and pull request so compilation failures are caught
-# early.  Also declared as a reusable workflow (`workflow_call`) so that
-# release.yml can invoke it on a tag push and then consume the uploaded
-# artifacts to publish the GitHub Release — without duplicating the matrix.
+# Declared as a reusable workflow (`workflow_call`) so that release.yml can
+# invoke it on a tag push and consume the uploaded artifacts to publish the
+# GitHub Release — without duplicating the matrix.
 
 name: Build
 
@@ -27,27 +26,22 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            cross: false
             ext: tar.xz
 
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
-            cross: true        # uses `cross` + Cross.toml for libudev
+            os: ubuntu-24.04-arm  # native ARM64 runner
             ext: tar.xz
 
-          - target: x86_64-apple-darwin
-            os: macos-13       # last Intel GitHub runner
-            cross: false
-            ext: tar.xz
+          # - target: x86_64-apple-darwin
+          #   os: macos-13       # last Intel GitHub runner
+          #   ext: tar.xz
 
           - target: aarch64-apple-darwin
             os: macos-latest   # Apple Silicon runner
-            cross: false
             ext: tar.xz
 
           - target: x86_64-pc-windows-msvc
             os: windows-latest
-            cross: false
             ext: zip
 
     steps:
@@ -70,30 +64,16 @@ jobs:
           key: ${{ runner.os }}-${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ runner.os }}-${{ matrix.target }}-cargo-
 
-      # Native Linux build only — cross handles its own sysroot.
-      - name: Install libudev-dev (Linux native)
-        if: runner.os == 'Linux' && matrix.cross == false
+      - name: Install libudev-dev (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y libudev-dev
 
-      # Pre-fetch all crates (including git deps) on the host so cross can
-      # find them in the mounted $CARGO_HOME.
       - name: Fetch dependencies
         run: cargo fetch --locked
 
-      - name: Install cross
-        if: matrix.cross == true
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cross
-
       # ── Build ────────────────────────────────────────────────────────────────
 
-      - name: Build (cross)
-        if: matrix.cross == true
-        run: cross build --release --locked --target ${{ matrix.target }}
-
-      - name: Build (cargo)
-        if: matrix.cross == false
+      - name: Build
         run: cargo build --release --locked --target ${{ matrix.target }}
 
       # ── Package ──────────────────────────────────────────────────────────────
