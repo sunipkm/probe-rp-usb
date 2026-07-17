@@ -24,8 +24,14 @@
 
 pub mod attach;
 pub mod bootsel;
+pub mod event;
 pub mod flash;
+pub(crate) mod progress;
 pub mod uf2;
 pub mod ui;
 pub mod usb;
 pub mod write;
+
+/// Re-export [`elf2uf2_core::Family`] so downstream crates that depend only
+/// on `probe_rp_usb` do not need a separate `elf2uf2-core` dependency.
+pub use elf2uf2_core::Family;

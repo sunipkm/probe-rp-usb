@@ -1,33 +1,13 @@
 use anyhow::{Context, Result};
 use elf2uf2_core::Family;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::{bootsel, uf2, ui, usb};
-
-// ---------------------------------------------------------------------------
-// Progress-reporting writer (mirrors the one in flash.rs)
-// ---------------------------------------------------------------------------
-
-struct ProgressWriter<W: Write> {
-    inner: W,
-    bar: ProgressBar,
-}
-
-impl<W: Write> Write for ProgressWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.bar.inc(n as u64);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
+use crate::event::{report, EventCallback, LogTag};
+use crate::progress::{ProgressReporter, ProgressWriter};
+use crate::{bootsel, ui, uf2, usb};
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -51,6 +31,10 @@ pub struct WriteTarget {
 /// `0x10000000` (the first flash page on RP2040/RP2350).  This invalidates the
 /// firmware header *before* the data lands, preventing the device from booting
 /// into stale firmware if it resets mid-transfer.
+///
+/// Pass `on_event: Some(cb)` to receive structured progress events instead of
+/// the default indicatif terminal output.
+#[allow(clippy::too_many_arguments)]
 pub fn write_data(
     targets: &[WriteTarget],
     erase_boot: bool,
@@ -59,6 +43,7 @@ pub fn write_data(
     pid: Option<u16>,
     bootsel_timeout_secs: u64,
     no_wait: bool,
+    on_event: Option<EventCallback>,
 ) -> Result<()> {
     let mut buf: Vec<u8> = Vec::new();
 
@@ -97,7 +82,7 @@ pub fn write_data(
     log::info!("Total UF2 blocks: {}", total);
     uf2::renumber_blocks(&mut buf, 0, total);
 
-    run_uf2_write(buf, vid, pid, bootsel_timeout_secs, no_wait, "Write")
+    run_uf2_write(buf, vid, pid, bootsel_timeout_secs, no_wait, "Write", &on_event)
 }
 
 /// Erase the entire flash region by writing `0xFF` to every 256-byte page.
@@ -105,6 +90,10 @@ pub fn write_data(
 /// Generates a UF2 file that covers all `flash_size` bytes starting at
 /// `base_addr`, with every byte set to `0xFF`.  This restores the flash to its
 /// erased state, removing any existing firmware or data.
+///
+/// Pass `on_event: Some(cb)` to receive structured progress events instead of
+/// the default indicatif terminal output.
+#[allow(clippy::too_many_arguments)]
 pub fn erase_flash(
     flash_size: u32,
     base_addr: u32,
@@ -113,6 +102,7 @@ pub fn erase_flash(
     pid: Option<u16>,
     bootsel_timeout_secs: u64,
     no_wait: bool,
+    on_event: Option<EventCallback>,
 ) -> Result<()> {
     anyhow::ensure!(flash_size > 0, "flash_size must be greater than zero");
     log::info!(
@@ -125,7 +115,7 @@ pub fn erase_flash(
     uf2::bin2uf2(data.as_slice(), &mut buf, base_addr, family as u32)
         .context("UF2 conversion failed (erase)")?;
 
-    run_uf2_write(buf, vid, pid, bootsel_timeout_secs, no_wait, "Erase")
+    run_uf2_write(buf, vid, pid, bootsel_timeout_secs, no_wait, "Erase", &on_event)
 }
 
 // ---------------------------------------------------------------------------
@@ -133,8 +123,7 @@ pub fn erase_flash(
 // ---------------------------------------------------------------------------
 
 /// Detect (or wait for) the BOOTSEL drive, write `buf` as a single UF2 file,
-/// and optionally wait for the device to reboot.  `op_name` is used in
-/// progress messages (e.g. `"Write"` or `"Erase"`).
+/// and optionally wait for the device to reboot.
 fn run_uf2_write(
     buf: Vec<u8>,
     vid: Option<u16>,
@@ -142,10 +131,12 @@ fn run_uf2_write(
     bootsel_timeout_secs: u64,
     no_wait: bool,
     op_name: &str,
+    on_event: &Option<EventCallback>,
 ) -> Result<()> {
     let mount = match bootsel::find_bootsel_drive() {
         Some(m) => {
             log::info!("BOOTSEL drive already mounted at {}", m.display());
+            report(on_event, format!("BOOTSEL drive: {}", m.display()), LogTag::Info);
             m
         }
         None => {
@@ -154,11 +145,27 @@ fn run_uf2_write(
                 vid.unwrap_or(usb::DEFAULT_VID),
                 pid.unwrap_or(usb::DEFAULT_PID),
             );
+            report(on_event, "Resetting device to BOOTSEL mode\u{2026}", LogTag::Info);
             usb::reset_to_bootsel(vid, pid)?;
-            let spin = ui::spinner("Waiting for BOOTSEL drive…");
+            let maybe_spin = if on_event.is_none() {
+                Some(ui::spinner("Waiting for BOOTSEL drive\u{2026}"))
+            } else {
+                report(on_event, "Waiting for BOOTSEL drive\u{2026}", LogTag::Info);
+                None
+            };
             let m = bootsel::wait_for_bootsel_drive(Duration::from_secs(bootsel_timeout_secs))
-                .inspect_err(|_| spin.abandon())?;
-            spin.finish_with_message(format!("BOOTSEL drive: {}", m.display()));
+                .inspect_err(|_| {
+                    if let Some(ref s) = maybe_spin {
+                        s.abandon();
+                    } else {
+                        report(on_event, "Timed out waiting for BOOTSEL drive", LogTag::Err);
+                    }
+                })?;
+            if let Some(spin) = maybe_spin {
+                spin.finish_with_message(format!("BOOTSEL drive: {}", m.display()));
+            } else {
+                report(on_event, format!("BOOTSEL drive: {}", m.display()), LogTag::Ok);
+            }
             m
         }
     };
@@ -167,25 +174,16 @@ fn run_uf2_write(
     let out_file = File::create(&out_path)
         .with_context(|| format!("Failed to create {}", out_path.display()))?;
 
-    let bar = ProgressBar::new(buf.len() as u64);
-    bar.set_style(
-        ProgressStyle::with_template(
-            "  Writing UF2  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-        )
-        .unwrap()
-        .progress_chars("█▉▊▋▌▍▎▏ "),
-    );
-    let mut pw = ProgressWriter {
-        inner: out_file,
-        bar: bar.clone(),
-    };
+    let reporter = ProgressReporter::progress(on_event, buf.len() as u64);
+    let finish_rpt = reporter.clone();
+    let mut pw = ProgressWriter::new(out_file, reporter);
     let write_result = pw
         .write_all(&buf)
         .context("Failed to write UF2 to BOOTSEL drive");
     if write_result.is_err() {
-        bar.abandon_with_message("Write failed");
+        finish_rpt.abandon("Write failed");
     } else {
-        bar.finish_with_message("UF2 written");
+        finish_rpt.finish("UF2 written");
     }
 
     if let Err(e) = write_result {
@@ -195,14 +193,33 @@ fn run_uf2_write(
 
     if no_wait {
         log::info!("--no-wait: skipping reboot wait");
-        println!("{op_name} complete (device left in BOOTSEL mode)");
+        if on_event.is_some() {
+            report(on_event, format!("{op_name} complete (device left in BOOTSEL mode)"), LogTag::Ok);
+        } else {
+            println!("{op_name} complete (device left in BOOTSEL mode)");
+        }
         return Ok(());
     }
 
-    let spin = ui::spinner("Waiting for device to reboot…");
+    let maybe_spin2 = if on_event.is_none() {
+        Some(ui::spinner("Waiting for device to reboot\u{2026}"))
+    } else {
+        report(on_event, "Waiting for device to reboot\u{2026}", LogTag::Info);
+        None
+    };
     bootsel::wait_for_bootsel_unmount(Duration::from_secs(15))
-        .inspect_err(|_| spin.abandon())
+        .inspect_err(|_| {
+            if let Some(ref s) = maybe_spin2 {
+                s.abandon();
+            } else {
+                report(on_event, "Timed out waiting for device to reboot", LogTag::Err);
+            }
+        })
         .context("Device did not unmount BOOTSEL drive")?;
-    spin.finish_with_message(format!("{op_name} complete"));
+    if let Some(spin) = maybe_spin2 {
+        spin.finish_with_message(format!("{op_name} complete"));
+    } else {
+        report(on_event, format!("{op_name} complete"), LogTag::Ok);
+    }
     Ok(())
 }

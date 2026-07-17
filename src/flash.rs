@@ -1,35 +1,13 @@
 use anyhow::{Context, Result};
 use elf2uf2_core::Family;
-use indicatif::{ProgressBar, ProgressStyle};
 use std::fs::{self, File};
-use std::io::{self, BufReader, Read, Seek, SeekFrom, Write};
+use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::{bootsel, uf2, ui, usb};
-
-// ---------------------------------------------------------------------------
-// Progress-reporting writer
-// ---------------------------------------------------------------------------
-
-/// Wraps any `Write` implementation and advances a `ProgressBar` with every
-/// byte written, so callers need not know about progress reporting.
-struct ProgressWriter<W: Write> {
-    inner: W,
-    bar: ProgressBar,
-}
-
-impl<W: Write> Write for ProgressWriter<W> {
-    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let n = self.inner.write(buf)?;
-        self.bar.inc(n as u64);
-        Ok(n)
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        self.inner.flush()
-    }
-}
+use crate::event::{report, EventCallback, LogTag};
+use crate::progress::{ProgressReporter, ProgressWriter};
+use crate::{bootsel, ui, uf2, usb};
 
 const ELF_MAGIC: [u8; 4] = [0x7F, b'E', b'L', b'F'];
 
@@ -45,6 +23,11 @@ fn is_elf_file(f: &mut File) -> Result<bool> {
 /// If no BOOTSEL drive is detected, the device is first reset into BOOTSEL mode.
 /// Input type is detected by ELF magic (`0x7FELF`); everything else is treated as
 /// a raw binary placed at `base_addr`.
+///
+/// Pass `on_event: Some(cb)` to receive structured progress events instead of
+/// the default indicatif terminal output.  `None` preserves the existing CLI
+/// behavior unchanged.
+#[allow(clippy::too_many_arguments)]
 pub fn flash(
     input_path: &Path,
     family: Family,
@@ -53,10 +36,12 @@ pub fn flash(
     pid: Option<u16>,
     bootsel_timeout_secs: u64,
     no_wait: bool,
+    on_event: Option<EventCallback>,
 ) -> Result<()> {
     let mount = match bootsel::find_bootsel_drive() {
         Some(m) => {
             log::info!("BOOTSEL drive already mounted at {}", m.display());
+            report(&on_event, format!("BOOTSEL drive: {}", m.display()), LogTag::Info);
             m
         }
         None => {
@@ -65,11 +50,27 @@ pub fn flash(
                 vid.unwrap_or(usb::DEFAULT_VID),
                 pid.unwrap_or(usb::DEFAULT_PID),
             );
+            report(&on_event, "Resetting device to BOOTSEL mode\u{2026}", LogTag::Info);
             usb::reset_to_bootsel(vid, pid)?;
-            let spin = ui::spinner("Waiting for BOOTSEL drive…");
+            let maybe_spin = if on_event.is_none() {
+                Some(ui::spinner("Waiting for BOOTSEL drive\u{2026}"))
+            } else {
+                report(&on_event, "Waiting for BOOTSEL drive\u{2026}", LogTag::Info);
+                None
+            };
             let m = bootsel::wait_for_bootsel_drive(Duration::from_secs(bootsel_timeout_secs))
-                .inspect_err(|_| spin.abandon())?;
-            spin.finish_with_message(format!("BOOTSEL drive: {}", m.display()));
+                .inspect_err(|_| {
+                    if let Some(ref s) = maybe_spin {
+                        s.abandon();
+                    } else {
+                        report(&on_event, "Timed out waiting for BOOTSEL drive", LogTag::Err);
+                    }
+                })?;
+            if let Some(spin) = maybe_spin {
+                spin.finish_with_message(format!("BOOTSEL drive: {}", m.display()));
+            } else {
+                report(&on_event, format!("BOOTSEL drive: {}", m.display()), LogTag::Ok);
+            }
             m
         }
     };
@@ -113,40 +114,23 @@ pub fn flash(
             return Err(e.context("UF2 conversion failed (primary image)"));
         }
 
-        let bar = ProgressBar::new(buf.len() as u64);
-        bar.set_style(
-            ProgressStyle::with_template(
-                "  Writing UF2  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-            )
-            .unwrap()
-            .progress_chars("█▉▊▋▌▍▎▏ "),
-        );
-        let mut pw = ProgressWriter {
-            inner: out_file,
-            bar: bar.clone(),
-        };
+        let reporter = ProgressReporter::progress(&on_event, buf.len() as u64);
+        let finish_rpt = reporter.clone();
+        let mut pw = ProgressWriter::new(out_file, reporter);
         let r = pw
             .write_all(&buf)
             .context("Failed to write UF2 to BOOTSEL drive");
         if r.is_err() {
-            bar.abandon_with_message("Write failed");
+            finish_rpt.abandon("Write failed");
         } else {
-            bar.finish_with_message("UF2 written");
+            finish_rpt.finish("UF2 written");
         }
         r
     } else {
-        // --- Streaming path: output size unknown, show spinner with byte count ---
-        let bar = ProgressBar::new_spinner();
-        bar.enable_steady_tick(Duration::from_millis(80));
-        bar.set_style(
-            ProgressStyle::with_template("{spinner:.cyan} Writing UF2… {bytes}")
-                .unwrap()
-                .tick_strings(ui::tick_chars()),
-        );
-        let pw = ProgressWriter {
-            inner: out_file,
-            bar: bar.clone(),
-        };
+        // --- Streaming path: output size unknown, use spinner / unbounded callback ---
+        let reporter = ProgressReporter::spinner(&on_event);
+        let finish_rpt = reporter.clone();
+        let pw = ProgressWriter::new(out_file, reporter);
         let r = if elf_input {
             log::info!("ELF → UF2 (streaming, family {:?})", family);
             elf2uf2_core::elf2uf2(BufReader::new(in_file), pw, family).map_err(anyhow::Error::from)
@@ -159,9 +143,9 @@ pub fn flash(
             uf2::bin2uf2(in_file, pw, base_addr, family as u32)
         };
         if r.is_err() {
-            bar.abandon_with_message("Write failed");
+            finish_rpt.abandon("Write failed");
         } else {
-            bar.finish_with_message("UF2 written");
+            finish_rpt.finish("UF2 written");
         }
         r
     };
@@ -173,14 +157,33 @@ pub fn flash(
 
     if no_wait {
         log::info!("--no-wait: skipping reboot wait");
-        println!("Flash complete (device left in BOOTSEL mode)");
+        if on_event.is_some() {
+            report(&on_event, "Flash complete (device left in BOOTSEL mode)", LogTag::Ok);
+        } else {
+            println!("Flash complete (device left in BOOTSEL mode)");
+        }
         return Ok(());
     }
 
-    let spin = ui::spinner("Waiting for device to reboot…");
+    let maybe_spin2 = if on_event.is_none() {
+        Some(ui::spinner("Waiting for device to reboot\u{2026}"))
+    } else {
+        report(&on_event, "Waiting for device to reboot\u{2026}", LogTag::Info);
+        None
+    };
     bootsel::wait_for_bootsel_unmount(Duration::from_secs(15))
-        .inspect_err(|_| spin.abandon())
+        .inspect_err(|_| {
+            if let Some(ref s) = maybe_spin2 {
+                s.abandon();
+            } else {
+                report(&on_event, "Timed out waiting for device to reboot", LogTag::Err);
+            }
+        })
         .context("Device did not unmount BOOTSEL drive after flashing")?;
-    spin.finish_with_message("Flash complete");
+    if let Some(spin) = maybe_spin2 {
+        spin.finish_with_message("Flash complete");
+    } else {
+        report(&on_event, "Flash complete", LogTag::Ok);
+    }
     Ok(())
 }

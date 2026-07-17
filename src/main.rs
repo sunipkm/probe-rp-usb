@@ -240,6 +240,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.bootsel_timeout,
                 no_wait,
+                None,
             )?;
         }
 
@@ -265,16 +266,17 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.bootsel_timeout,
                 no_wait,
+                None,
             )?;
         }
 
         Cmd::Attach { elf, port } => {
             let port = resolve_port(port, cli.vid, cli.pid)?;
-            attach::attach(&elf, &port, cli.baud, cli.read_timeout_ms)?;
+            attach::attach(&elf, &port, cli.baud, cli.read_timeout_ms, None, None)?;
         }
 
         Cmd::Watch { elf, port } => {
-            attach::watch(&elf, port, cli.vid, cli.pid, cli.baud, cli.read_timeout_ms)?;
+            attach::watch(&elf, port, cli.vid, cli.pid, cli.baud, cli.read_timeout_ms, None, None)?;
         }
 
         Cmd::Run {
@@ -291,6 +293,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.bootsel_timeout,
                 false,
+                None,
             )?;
             attach::watch(
                 &input,
@@ -299,6 +302,8 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.baud,
                 cli.read_timeout_ms,
+                None,
+                None,
             )?;
         }
 
@@ -316,6 +321,7 @@ fn run(cli: Cli) -> Result<()> {
                 cli.pid,
                 cli.bootsel_timeout,
                 no_wait,
+                None,
             )?;
         }
     }

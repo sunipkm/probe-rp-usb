@@ -4,8 +4,11 @@ use serialport::SerialPortType;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::event::{EventCallback, LogTag, ProbeEvent};
 use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VIDS};
 
 /// Return a sort key that orders port names naturally, treating a trailing digit
@@ -123,12 +126,18 @@ fn load_table(elf_path: &Path) -> Result<Table> {
         })
 }
 
-/// Open `port_name`, feed received bytes through the `StreamDecoder`, and print decoded frames.
+/// Open `port_name`, feed received bytes through the `StreamDecoder`, and
+/// print decoded frames (or route them through `on_event` when `Some`).
 ///
-/// Returns when the serial port closes/errors.  `DecodeError::UnexpectedEof` signals that
-/// more bytes are needed (normal); `DecodeError::Malformed` is handled based on the
-/// encoding's recovery capability.
-fn run_decode_loop(table: &Table, port_name: &str, baud: u32, read_timeout_ms: u64) -> Result<()> {
+/// Returns when the serial port closes/errors or `stop_flag` is set to `true`.
+fn run_decode_loop(
+    table: &Table,
+    port_name: &str,
+    baud: u32,
+    read_timeout_ms: u64,
+    on_event: &Option<EventCallback>,
+    stop_flag: &Option<Arc<AtomicBool>>,
+) -> Result<()> {
     let mut decoder = table.new_stream_decoder();
 
     let mut port = serialport::new(port_name, baud)
@@ -139,11 +148,19 @@ fn run_decode_loop(table: &Table, port_name: &str, baud: u32, read_timeout_ms: u
     let mut buf = [0u8; 1024];
 
     loop {
+        // Check the stop flag after each read-timeout window (max 100 ms latency).
+        if stop_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return Ok(());
+        }
+
         match port.read(&mut buf) {
             Ok(0) => {}
             Ok(n) => {
                 decoder.received(&buf[..n]);
-                drain_frames(&mut *decoder, table)?;
+                drain_frames(&mut *decoder, table, on_event)?;
             }
             Err(ref e) if e.kind() == ErrorKind::TimedOut => {
                 // No data in this read_timeout_ms window — normal.
@@ -155,17 +172,35 @@ fn run_decode_loop(table: &Table, port_name: &str, baud: u32, read_timeout_ms: u
     }
 }
 
-/// Drain all currently decodable frames from `decoder`, printing each one.
-fn drain_frames(decoder: &mut dyn StreamDecoder, table: &Table) -> Result<()> {
+/// Drain all currently decodable frames from `decoder`, routing each one
+/// through `on_event` (when `Some`) or printing to stdout (when `None`).
+fn drain_frames(
+    decoder: &mut dyn StreamDecoder,
+    table: &Table,
+    on_event: &Option<EventCallback>,
+) -> Result<()> {
     loop {
         match decoder.decode() {
             Ok(frame) => {
-                println!("{}", frame.display(true));
+                let text = frame.display(true).to_string();
+                match on_event {
+                    Some(cb) => cb(ProbeEvent::Frame(text)),
+                    None => println!("{}", text),
+                }
             }
             Err(DecodeError::UnexpectedEof) => break,
             Err(DecodeError::Malformed) => {
                 if table.encoding().can_recover() {
-                    log::warn!("Malformed defmt frame skipped (encoding can recover)");
+                    match on_event {
+                        Some(cb) => cb(ProbeEvent::Log {
+                            msg: "Malformed defmt frame skipped (encoding can recover)"
+                                .to_owned(),
+                            tag: LogTag::Warn,
+                        }),
+                        None => log::warn!(
+                            "Malformed defmt frame skipped (encoding can recover)"
+                        ),
+                    }
                 } else {
                     return Err(anyhow::anyhow!(
                         "Malformed defmt frame — encoding cannot recover; aborting"
@@ -178,17 +213,32 @@ fn drain_frames(decoder: &mut dyn StreamDecoder, table: &Table) -> Result<()> {
     Ok(())
 }
 
-/// Attach to the serial port and decode defmt output.  Exits when the port is closed or on error.
-pub fn attach(elf_path: &Path, port_name: &str, baud: u32, read_timeout_ms: u64) -> Result<()> {
+/// Attach to the serial port and decode defmt output.
+///
+/// Returns when the port closes, on error, or when `stop_flag` is set.
+/// Pass `on_event: Some(cb)` to receive frames via callback instead of stdout.
+pub fn attach(
+    elf_path: &Path,
+    port_name: &str,
+    baud: u32,
+    read_timeout_ms: u64,
+    on_event: Option<EventCallback>,
+    stop_flag: Option<Arc<AtomicBool>>,
+) -> Result<()> {
     let table = load_table(elf_path)?;
-    println!("Attached to {} (Ctrl+C to quit)", port_name);
-    run_decode_loop(&table, port_name, baud, read_timeout_ms)
+    match &on_event {
+        Some(cb) => cb(ProbeEvent::Connected { port: port_name.to_owned() }),
+        None => println!("Attached to {} (Ctrl+C to quit)", port_name),
+    }
+    run_decode_loop(&table, port_name, baud, read_timeout_ms, &on_event, &stop_flag)
 }
 
 /// Like `attach`, but reconnects automatically whenever the device disconnects.
 ///
-/// The defmt `Table` is loaded once and reused across reconnects so no ELF re-read is needed.
-/// If `port_override` is `None`, the port is discovered by VID/PID on each (re-)connection.
+/// The defmt `Table` is loaded once and reused across reconnects.
+/// Returns when `stop_flag` is set, a fatal error occurs, or (if
+/// `port_override` is set) the connection closes.
+#[allow(clippy::too_many_arguments)]
 pub fn watch(
     elf_path: &Path,
     port_override: Option<String>,
@@ -196,38 +246,62 @@ pub fn watch(
     pid: Option<u16>,
     baud: u32,
     read_timeout_ms: u64,
+    on_event: Option<EventCallback>,
+    stop_flag: Option<Arc<AtomicBool>>,
 ) -> Result<()> {
     let table = load_table(elf_path)?;
 
     loop {
+        // Check stop flag before each reconnect attempt.
+        if stop_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return Ok(());
+        }
+
         let port_name = match port_override.as_deref() {
             Some(p) => p.to_owned(),
-            None => match wait_for_serial_port(vid, pid, Duration::from_secs(30)) {
+            None => match wait_for_serial_port(vid, pid, Duration::from_secs(30), &stop_flag) {
                 Some(p) => p,
                 None => {
+                    // Either timed out or stop_flag was set.
+                    if stop_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                        return Ok(());
+                    }
                     let pid_str = pid
                         .map(|p| format!("PID {:04x}", p))
                         .unwrap_or_else(|| "any PID".into());
                     let fallback_str: Vec<String> =
                         FALLBACK_VIDS.iter().map(|v| format!("{v:04x}")).collect();
-                    eprintln!(
+                    let msg = format!(
                         "Timed out waiting for serial port \
                          (VID {:04x} {} / fallback VID {}) — retrying",
                         vid.unwrap_or(DEFAULT_VID),
                         pid_str,
                         fallback_str.join("/"),
                     );
+                    match &on_event {
+                        Some(cb) => cb(ProbeEvent::Log { msg, tag: LogTag::Warn }),
+                        None => eprintln!("{}", msg),
+                    }
                     continue;
                 }
             },
         };
 
-        println!("Connecting to {}...", port_name);
+        match &on_event {
+            Some(cb) => cb(ProbeEvent::Connected { port: port_name.clone() }),
+            None => println!("Connecting to {}...", port_name),
+        }
 
-        match run_decode_loop(&table, &port_name, baud, read_timeout_ms) {
+        match run_decode_loop(&table, &port_name, baud, read_timeout_ms, &on_event, &stop_flag) {
             Ok(()) => break,
             Err(e) => {
-                eprintln!("Disconnected: {:#}", e);
+                match &on_event {
+                    Some(cb) => cb(ProbeEvent::Disconnected),
+                    None => eprintln!("Disconnected: {:#}", e),
+                }
                 if port_override.is_some() {
                     std::thread::sleep(Duration::from_secs(1));
                 }
@@ -238,10 +312,22 @@ pub fn watch(
     Ok(())
 }
 
-/// Poll until a serial port appears (using the fallback scan when `vid` is `None`), or timeout.
-fn wait_for_serial_port(vid: Option<u16>, pid: Option<u16>, timeout: Duration) -> Option<String> {
+/// Poll until a serial port appears or `timeout` elapses.
+/// Returns `None` if the timeout elapses OR `stop_flag` is set.
+fn wait_for_serial_port(
+    vid: Option<u16>,
+    pid: Option<u16>,
+    timeout: Duration,
+    stop_flag: &Option<Arc<AtomicBool>>,
+) -> Option<String> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
+        if stop_flag
+            .as_ref()
+            .is_some_and(|f| f.load(Ordering::Relaxed))
+        {
+            return None;
+        }
         if let Some(port) = find_serial_port(vid, pid) {
             return Some(port);
         }
