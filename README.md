@@ -16,8 +16,10 @@ all from one command, over the same USB cable that powers the board.
 ## Features
 
 - Reboot into BOOTSEL mode without touching the button
-- Convert ELF or raw binary to UF2 and flash via the BOOTSEL mass-storage
-  interface
+- Flash ELF or raw binary images through the BOOTSEL PICOBOOT vendor USB
+  interface by default, with UF2 mass-storage available as a compatibility
+  backend
+- Read an exact byte range from flash into a file
 - Decode `defmt` output streamed over USB CDC-ACM (no probe hardware needed)
 - Watch mode: reconnect automatically across device resets and reflashes
 - `run` subcommand: flash + watch in a single invocation (equivalent to
@@ -167,8 +169,60 @@ Options:
 probe-rp-usb flash target/thumbv8m.main-none-eabihf/release/my-firmware
 ```
 
-Reboots into BOOTSEL if needed, converts the ELF to UF2, writes it, and waits
-for the device to unmount before returning.
+Reboots into BOOTSEL if needed, writes the image through the PICOBOOT vendor
+USB interface, and then reboots the device. ELF inputs are converted to UF2 in
+memory to determine their flash layout, then written directly over PICOBOOT.
+Raw binary inputs are written at `--address`.
+
+Use `--backend uf2` to use the BOOTSEL mass-storage drive instead.
+
+Options:
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--backend` | `picoboot` | `picoboot` for direct USB commands, `uf2` for mass-storage flashing |
+| `--family` | `rp2350-arm-s` | UF2 family tag used for ELF layout or UF2 output |
+| `--address` | `0x10000000` | Flash base address (raw binary inputs only) |
+| `--no-wait` | disabled | Leave the device in BOOTSEL mode after flashing |
+
+---
+
+#### `write` — write raw data ranges
+
+```sh
+probe-rp-usb write settings.bin@0x10040000 assets.bin@0x10100000
+```
+
+Writes one or more raw binary files at exact flash addresses. The PICOBOOT
+backend performs sector read-modify-erase-write, so unaligned writes preserve
+neighboring bytes in the same flash sector.
+
+Use `--base` to add a common base address to every `FILE@OFFSET`, and
+`--backend uf2` to use the mass-storage fallback.
+
+---
+
+#### `read-flash` — read a flash byte range
+
+```sh
+probe-rp-usb read-flash 0x10000000 0x10000 firmware.bin
+```
+
+Reboots into BOOTSEL if needed and reads exactly `LENGTH` bytes starting at
+`ADDRESS` into `OUTPUT` using the PICOBOOT vendor USB interface.
+
+---
+
+#### `erase` — erase a flash range
+
+```sh
+probe-rp-usb erase 0x400000
+```
+
+Erases `FLASH_SIZE` bytes starting at `--base` using PICOBOOT flash erase
+commands. Direct erase requires both the base and size to be 4096-byte aligned.
+Use `--backend uf2` to write `0xFF` data over the range through the BOOTSEL
+mass-storage drive.
 
 ---
 

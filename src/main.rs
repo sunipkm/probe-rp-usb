@@ -1,8 +1,8 @@
 use probe_rp_usb::{attach, bootsel, flash, ui, usb, write};
 
 use anyhow::Result;
-use clap::{Parser, Subcommand};
-use elf2uf2_core::Family;
+use clap::{Parser, Subcommand, ValueEnum};
+use probe_rp_usb::Family;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -74,6 +74,12 @@ struct Cli {
     command: Cmd,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Backend {
+    Picoboot,
+    Uf2,
+}
+
 #[derive(Subcommand)]
 enum Cmd {
     /// Check whether a BOOTSEL USB storage drive is currently mounted and print its path
@@ -82,9 +88,9 @@ enum Cmd {
     /// Reset the device into BOOTSEL mode and wait for the storage drive to appear
     Reset,
 
-    /// Convert an ELF or raw binary to UF2 and flash it to the device
+    /// Flash an ELF or raw binary to the device
     ///
-    /// If no BOOTSEL drive is mounted the device is reset automatically before flashing.
+    /// If needed, the device is reset automatically before flashing.
     Flash {
         /// Input firmware file (ELF detected by magic bytes; anything else treated as raw binary)
         input: PathBuf,
@@ -101,13 +107,17 @@ enum Cmd {
         /// Useful when writing data partitions that should not trigger a firmware reset.
         #[arg(long)]
         no_wait: bool,
+
+        /// Flash backend to use. PICOBOOT is direct USB; UF2 uses the mass-storage drive.
+        #[arg(long, value_enum, default_value = "picoboot")]
+        backend: Backend,
     },
 
     /// Write one or more raw binary images to flash at specific addresses
     ///
     /// Each FILE@OFFSET argument specifies a binary file and its offset relative
     /// to --base (default 0x0, i.e. offsets are absolute addresses).  All images
-    /// are written as a single UF2 file so the device resets exactly once.
+    /// are written in one session so the device resets exactly once.
     Write {
         /// One or more `FILE@OFFSET` targets, e.g. `data.bin@0x100000`.
         /// Offsets are added to --base to produce the final flash address.
@@ -134,6 +144,24 @@ enum Cmd {
         /// Do not wait for the device to reboot after writing (leaves device in BOOTSEL mode).
         #[arg(long)]
         no_wait: bool,
+
+        /// Flash backend to use. PICOBOOT is direct USB; UF2 uses the mass-storage drive.
+        #[arg(long, value_enum, default_value = "picoboot")]
+        backend: Backend,
+    },
+
+    /// Read bytes from flash at an absolute address into a file
+    ReadFlash {
+        /// Flash address to start reading from (decimal or 0x-prefixed hex)
+        #[arg(value_parser = parse_u32_hex)]
+        address: u32,
+
+        /// Number of bytes to read (decimal or 0x-prefixed hex)
+        #[arg(value_parser = parse_u32_hex)]
+        length: u32,
+
+        /// Output file to create or replace
+        output: PathBuf,
     },
 
     /// Attach to the device's last serial port and decode defmt output
@@ -172,13 +200,16 @@ enum Cmd {
         /// Override the auto-detected serial port
         #[arg(long)]
         port: Option<String>,
+
+        /// Flash backend to use before attaching.
+        #[arg(long, value_enum, default_value = "picoboot")]
+        backend: Backend,
     },
 
-    /// Erase the entire flash by writing 0xFF to every page
+    /// Erase a flash range
     ///
-    /// Generates a UF2 file that covers all FLASH_SIZE bytes starting at --base,
-    /// with every byte set to 0xFF.  This restores flash to its erased state,
-    /// removing any existing firmware or data.
+    /// With the PICOBOOT backend this sends flash erase commands. With --backend uf2,
+    /// it writes 0xFF data over the requested range.
     Erase {
         /// Total flash size in bytes (decimal or 0x-prefixed hex).
         /// Common values: 0x200000 (2 MiB), 0x400000 (4 MiB), 0x800000 (8 MiB).
@@ -196,6 +227,10 @@ enum Cmd {
         /// Do not wait for the device to reboot after erasing (leaves device in BOOTSEL mode).
         #[arg(long)]
         no_wait: bool,
+
+        /// Flash backend to use. PICOBOOT is direct USB; UF2 uses the mass-storage drive.
+        #[arg(long, value_enum, default_value = "picoboot")]
+        backend: Backend,
     },
 }
 
@@ -231,8 +266,9 @@ fn run(cli: Cli) -> Result<()> {
             family,
             address,
             no_wait,
-        } => {
-            flash::flash(
+            backend,
+        } => match backend {
+            Backend::Picoboot => flash::flash(
                 &input,
                 family,
                 address,
@@ -241,8 +277,18 @@ fn run(cli: Cli) -> Result<()> {
                 cli.bootsel_timeout,
                 no_wait,
                 None,
-            )?;
-        }
+            )?,
+            Backend::Uf2 => flash::flash_uf2(
+                &input,
+                family,
+                address,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
+                no_wait,
+                None,
+            )?,
+        },
 
         Cmd::Write {
             targets,
@@ -250,6 +296,7 @@ fn run(cli: Cli) -> Result<()> {
             family,
             erase_boot,
             no_wait,
+            backend,
         } => {
             let targets: Vec<write::WriteTarget> = targets
                 .into_iter()
@@ -258,14 +305,42 @@ fn run(cli: Cli) -> Result<()> {
                     address: base.wrapping_add(t.address),
                 })
                 .collect();
-            write::write_data(
-                &targets,
-                erase_boot,
-                family,
+            match backend {
+                Backend::Picoboot => write::write_data(
+                    &targets,
+                    erase_boot,
+                    family,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    no_wait,
+                    None,
+                )?,
+                Backend::Uf2 => write::write_data_uf2(
+                    &targets,
+                    erase_boot,
+                    family,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    no_wait,
+                    None,
+                )?,
+            }
+        }
+
+        Cmd::ReadFlash {
+            address,
+            length,
+            output,
+        } => {
+            write::read_flash(
+                address,
+                length,
+                &output,
                 cli.vid,
                 cli.pid,
                 cli.bootsel_timeout,
-                no_wait,
                 None,
             )?;
         }
@@ -276,7 +351,16 @@ fn run(cli: Cli) -> Result<()> {
         }
 
         Cmd::Watch { elf, port } => {
-            attach::watch(&elf, port, cli.vid, cli.pid, cli.baud, cli.read_timeout_ms, None, None)?;
+            attach::watch(
+                &elf,
+                port,
+                cli.vid,
+                cli.pid,
+                cli.baud,
+                cli.read_timeout_ms,
+                None,
+                None,
+            )?;
         }
 
         Cmd::Run {
@@ -284,17 +368,30 @@ fn run(cli: Cli) -> Result<()> {
             family,
             address,
             port,
+            backend,
         } => {
-            flash::flash(
-                &input,
-                family,
-                address,
-                cli.vid,
-                cli.pid,
-                cli.bootsel_timeout,
-                false,
-                None,
-            )?;
+            match backend {
+                Backend::Picoboot => flash::flash(
+                    &input,
+                    family,
+                    address,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    false,
+                    None,
+                )?,
+                Backend::Uf2 => flash::flash_uf2(
+                    &input,
+                    family,
+                    address,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    false,
+                    None,
+                )?,
+            }
             attach::watch(
                 &input,
                 port,
@@ -312,8 +409,9 @@ fn run(cli: Cli) -> Result<()> {
             base,
             family,
             no_wait,
-        } => {
-            write::erase_flash(
+            backend,
+        } => match backend {
+            Backend::Picoboot => write::erase_flash(
                 flash_size,
                 base,
                 family,
@@ -322,8 +420,18 @@ fn run(cli: Cli) -> Result<()> {
                 cli.bootsel_timeout,
                 no_wait,
                 None,
-            )?;
-        }
+            )?,
+            Backend::Uf2 => write::erase_flash_uf2(
+                flash_size,
+                base,
+                family,
+                cli.vid,
+                cli.pid,
+                cli.bootsel_timeout,
+                no_wait,
+                None,
+            )?,
+        },
     }
 
     Ok(())
