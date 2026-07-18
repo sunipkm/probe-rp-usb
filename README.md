@@ -89,10 +89,13 @@ sudo cp 99-probe-rp-usb.rules /etc/udev/rules.d/
 sudo udevadm control --reload-rules && sudo udevadm trigger
 ```
 
-Your user must be in the `plugdev` group (`groups $USER`).  If not:
+Your user must be in the `plugdev` group for raw USB access and `dialout` for
+serial ports (`groups $USER`).  If not:
 
 ```sh
-sudo usermod -aG plugdev $USER   # log out and back in to apply
+sudo usermod -aG plugdev $USER   # raw USB device access
+sudo usermod -aG dialout $USER   # serial port access
+# log out and back in to apply group changes
 ```
 
 The rule file covers:
@@ -101,6 +104,7 @@ The rule file covers:
 |--------|--------------------------------------------|
 | `2E8A` | Raspberry Pi (app mode + BOOTSEL/picoboot) |
 | `C0DE` | Custom VID fallback                        |
+| `C001` | Custom VID fallback                        |
 
 ## macOS setup
 
@@ -140,7 +144,11 @@ probe-rp-usb [--vid <VID>] [--pid <PID>] <SUBCOMMAND>
 
 `--vid` / `--pid` accept decimal or `0x`-prefixed hex values.  When omitted,
 the tool defaults to VID `0x2E8A` / PID `0x0009` (Raspberry Pi stdio USB) and
-also probes VID `0xC0DE` as a fallback.
+also probes VID `0xC0DE` and `0xC001` as fallbacks.
+
+ELF inputs are converted with the local `probe_rp_usb::elf` module. Raw binary
+inputs are wrapped directly as UF2 pages or written with PICOBOOT at the address
+you provide.
 
 ### Subcommands
 
@@ -157,7 +165,7 @@ Options:
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--family` | `rp2350-arm-s` | UF2 family tag (`rp2040`, `rp2350-arm-s`, `rp2350-arm-ns`, `rp2350-riscv`) |
+| `--family` | `rp2350-arm-s` | UF2 family tag (`rp2040`, `rp2xxx-absolute`, `rp2xxx-data`, `rp2350-arm-s`, `rp2350-arm-ns`, `rp2350-riscv`) |
 | `--address` | `0x10000000` | Flash base address (raw binary inputs only) |
 | `--port` | auto-detect | Override the serial port |
 
@@ -202,10 +210,10 @@ Use `--base` to add a common base address to every `FILE@OFFSET`, and
 
 ---
 
-#### `read-flash` — read a flash byte range
+#### `read` — read a flash byte range
 
 ```sh
-probe-rp-usb read-flash 0x10000000 0x10000 firmware.bin
+probe-rp-usb read 0x10000000 0x10000 firmware.bin
 ```
 
 Reboots into BOOTSEL if needed and reads exactly `LENGTH` bytes starting at
@@ -247,14 +255,17 @@ Like `watch` but exits when the port closes instead of reconnecting.
 
 ---
 
-#### `reset` — reboot into BOOTSEL
+#### `reset` — reboot into BOOTSEL or normal mode
 
 ```sh
 probe-rp-usb reset
+probe-rp-usb reset --normal
 ```
 
 Sends a vendor USB request to reboot the device into the ROM bootloader and
-waits for the BOOTSEL mass-storage drive to appear.
+waits for the BOOTSEL mass-storage drive to appear. With `--normal`, sends a
+PICOBOOT normal reboot request to a device already in BOOTSEL mode; if the
+app-mode device is already present, the command succeeds without changing it.
 
 ---
 
@@ -266,6 +277,23 @@ probe-rp-usb check
 
 Prints the mount path if a BOOTSEL drive is currently visible, otherwise exits
 with an error.
+
+## Library API
+
+The crate exposes the same building blocks used by the CLI:
+
+- `flash::flash` and `flash::flash_uf2` write ELF or raw binary inputs through
+  the PICOBOOT or UF2 mass-storage backends.
+- `write::*` reads, writes, and erases raw flash ranges.
+- `attach::*` decodes `defmt` streams and can reconnect across resets.
+- `usb::reset_to_bootsel` reboots app-mode firmware into BOOTSEL.
+- `usb::reboot_to_normal` reboots a BOOTSEL/PICOBOOT device back into the
+  normal application, or returns success if the app-mode device is already
+  present.
+- `elf::elf2uf2` and `uf2::*` provide the local ELF-to-UF2 and raw UF2 helpers.
+
+Use the re-exported `probe_rp_usb::Family` enum for UF2 family IDs; downstream
+crates do not need to depend on `elf2uf2-core`.
 
 ## Companion firmware
 

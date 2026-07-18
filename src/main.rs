@@ -85,8 +85,12 @@ enum Cmd {
     /// Check whether a BOOTSEL USB storage drive is currently mounted and print its path
     Check,
 
-    /// Reset the device into BOOTSEL mode and wait for the storage drive to appear
-    Reset,
+    /// Reset the device into BOOTSEL mode, or back to normal mode from BOOTSEL
+    Reset {
+        /// Reboot a BOOTSEL/PICOBOOT device back into its normal application.
+        #[arg(long)]
+        normal: bool,
+    },
 
     /// Flash an ELF or raw binary to the device
     ///
@@ -151,7 +155,7 @@ enum Cmd {
     },
 
     /// Read bytes from flash at an absolute address into a file
-    ReadFlash {
+    Read {
         /// Flash address to start reading from (decimal or 0x-prefixed hex)
         #[arg(value_parser = parse_u32_hex)]
         address: u32,
@@ -253,12 +257,18 @@ fn run(cli: Cli) -> Result<()> {
             None => anyhow::bail!("No BOOTSEL drive found"),
         },
 
-        Cmd::Reset => {
-            usb::reset_to_bootsel(cli.vid, cli.pid)?;
-            let spin = ui::spinner("Waiting for BOOTSEL drive…");
-            let path = bootsel::wait_for_bootsel_drive(Duration::from_secs(cli.bootsel_timeout))
-                .inspect_err(|_| spin.abandon())?;
-            spin.finish_with_message(format!("BOOTSEL drive: {}", path.display()));
+        Cmd::Reset { normal } => {
+            if normal {
+                usb::reboot_to_normal(cli.vid, cli.pid)?;
+                println!("Reset to normal application mode");
+            } else {
+                usb::reset_to_bootsel(cli.vid, cli.pid)?;
+                let spin = ui::spinner("Waiting for BOOTSEL drive…");
+                let path =
+                    bootsel::wait_for_bootsel_drive(Duration::from_secs(cli.bootsel_timeout))
+                        .inspect_err(|_| spin.abandon())?;
+                spin.finish_with_message(format!("BOOTSEL drive: {}", path.display()));
+            }
         }
 
         Cmd::Flash {
@@ -329,7 +339,7 @@ fn run(cli: Cli) -> Result<()> {
             }
         }
 
-        Cmd::ReadFlash {
+        Cmd::Read {
             address,
             length,
             output,
