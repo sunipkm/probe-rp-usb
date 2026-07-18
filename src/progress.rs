@@ -18,7 +18,11 @@ use crate::event::{EventCallback, LogTag, ProbeEvent};
 #[derive(Clone)]
 pub(crate) enum ProgressReporter {
     Bar(ProgressBar),
-    Callback { written: u64, total: Option<u64>, cb: EventCallback },
+    Callback {
+        written: u64,
+        total: Option<u64>,
+        cb: EventCallback,
+    },
 }
 
 impl ProgressReporter {
@@ -37,7 +41,9 @@ impl ProgressReporter {
                         "  Writing UF2  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
                     )
                     .unwrap()
-                    .progress_chars("\u{2588}\u{2589}\u{258a}\u{258b}\u{258c}\u{258d}\u{258e}\u{258f} "),
+                    .progress_chars(
+                        "\u{2588}\u{2589}\u{258a}\u{258b}\u{258c}\u{258d}\u{258e}\u{258f} ",
+                    ),
                 );
                 ProgressReporter::Bar(bar)
             }
@@ -56,11 +62,9 @@ impl ProgressReporter {
                 let bar = ProgressBar::new_spinner();
                 bar.enable_steady_tick(Duration::from_millis(80));
                 bar.set_style(
-                    ProgressStyle::with_template(
-                        "{spinner:.cyan} Writing UF2\u{2026} {bytes}",
-                    )
-                    .unwrap()
-                    .tick_strings(crate::ui::tick_chars()),
+                    ProgressStyle::with_template("{spinner:.cyan} Writing UF2\u{2026} {bytes}")
+                        .unwrap()
+                        .tick_strings(crate::ui::tick_chars()),
                 );
                 ProgressReporter::Bar(bar)
             }
@@ -73,7 +77,10 @@ impl ProgressReporter {
             ProgressReporter::Bar(bar) => bar.inc(n),
             ProgressReporter::Callback { written, total, cb } => {
                 *written += n;
-                cb(ProbeEvent::Progress { written: *written, total: *total });
+                cb(ProbeEvent::Progress {
+                    written: *written,
+                    total: *total,
+                });
             }
         }
     }
@@ -83,7 +90,10 @@ impl ProgressReporter {
         match self {
             ProgressReporter::Bar(bar) => bar.finish_with_message(msg.to_owned()),
             ProgressReporter::Callback { cb, .. } => {
-                cb(ProbeEvent::Log { msg: msg.to_owned(), tag: LogTag::Ok });
+                cb(ProbeEvent::Log {
+                    msg: msg.to_owned(),
+                    tag: LogTag::Ok,
+                });
             }
         }
     }
@@ -93,7 +103,10 @@ impl ProgressReporter {
         match self {
             ProgressReporter::Bar(bar) => bar.abandon_with_message(msg.to_owned()),
             ProgressReporter::Callback { cb, .. } => {
-                cb(ProbeEvent::Log { msg: msg.to_owned(), tag: LogTag::Err });
+                cb(ProbeEvent::Log {
+                    msg: msg.to_owned(),
+                    tag: LogTag::Err,
+                });
             }
         }
     }

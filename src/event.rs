@@ -44,6 +44,9 @@ pub type EventCallback = Arc<dyn Fn(ProbeEvent) + Send + Sync + 'static>;
 #[inline]
 pub fn report(on_event: &Option<EventCallback>, msg: impl Into<String>, tag: LogTag) {
     if let Some(cb) = on_event {
-        cb(ProbeEvent::Log { msg: msg.into(), tag });
+        cb(ProbeEvent::Log {
+            msg: msg.into(),
+            tag,
+        });
     }
 }

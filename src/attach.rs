@@ -4,8 +4,8 @@ use serialport::SerialPortType;
 use std::fs;
 use std::io::ErrorKind;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::event::{EventCallback, LogTag, ProbeEvent};
@@ -193,13 +193,10 @@ fn drain_frames(
                 if table.encoding().can_recover() {
                     match on_event {
                         Some(cb) => cb(ProbeEvent::Log {
-                            msg: "Malformed defmt frame skipped (encoding can recover)"
-                                .to_owned(),
+                            msg: "Malformed defmt frame skipped (encoding can recover)".to_owned(),
                             tag: LogTag::Warn,
                         }),
-                        None => log::warn!(
-                            "Malformed defmt frame skipped (encoding can recover)"
-                        ),
+                        None => log::warn!("Malformed defmt frame skipped (encoding can recover)"),
                     }
                 } else {
                     return Err(anyhow::anyhow!(
@@ -227,10 +224,19 @@ pub fn attach(
 ) -> Result<()> {
     let table = load_table(elf_path)?;
     match &on_event {
-        Some(cb) => cb(ProbeEvent::Connected { port: port_name.to_owned() }),
+        Some(cb) => cb(ProbeEvent::Connected {
+            port: port_name.to_owned(),
+        }),
         None => println!("Attached to {} (Ctrl+C to quit)", port_name),
     }
-    run_decode_loop(&table, port_name, baud, read_timeout_ms, &on_event, &stop_flag)
+    run_decode_loop(
+        &table,
+        port_name,
+        baud,
+        read_timeout_ms,
+        &on_event,
+        &stop_flag,
+    )
 }
 
 /// Like `attach`, but reconnects automatically whenever the device disconnects.
@@ -266,7 +272,10 @@ pub fn watch(
                 Some(p) => p,
                 None => {
                     // Either timed out or stop_flag was set.
-                    if stop_flag.as_ref().is_some_and(|f| f.load(Ordering::Relaxed)) {
+                    if stop_flag
+                        .as_ref()
+                        .is_some_and(|f| f.load(Ordering::Relaxed))
+                    {
                         return Ok(());
                     }
                     let pid_str = pid
@@ -282,7 +291,10 @@ pub fn watch(
                         fallback_str.join("/"),
                     );
                     match &on_event {
-                        Some(cb) => cb(ProbeEvent::Log { msg, tag: LogTag::Warn }),
+                        Some(cb) => cb(ProbeEvent::Log {
+                            msg,
+                            tag: LogTag::Warn,
+                        }),
                         None => eprintln!("{}", msg),
                     }
                     continue;
@@ -291,11 +303,20 @@ pub fn watch(
         };
 
         match &on_event {
-            Some(cb) => cb(ProbeEvent::Connected { port: port_name.clone() }),
+            Some(cb) => cb(ProbeEvent::Connected {
+                port: port_name.clone(),
+            }),
             None => println!("Connecting to {}...", port_name),
         }
 
-        match run_decode_loop(&table, &port_name, baud, read_timeout_ms, &on_event, &stop_flag) {
+        match run_decode_loop(
+            &table,
+            &port_name,
+            baud,
+            read_timeout_ms,
+            &on_event,
+            &stop_flag,
+        ) {
             Ok(()) => break,
             Err(e) => {
                 match &on_event {

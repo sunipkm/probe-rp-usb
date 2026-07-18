@@ -19,7 +19,7 @@ defmt-decoder = "1.1"
 elf = "0.8"
 env_logger = "0.11"
 log = "0.4"
-nusb = { version = "0.2.3", features = ["smol"] }
+nusb = { version = "0.2", features = ["smol"] }
 serialport = { version = "4", features = ["usbportinfo-interface"] }
 sysinfo = "0.39"
 thiserror = "2"
