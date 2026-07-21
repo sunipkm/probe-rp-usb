@@ -61,6 +61,53 @@ pub fn find_device(vid: u16, pid: u16) -> Option<DeviceInfo> {
         .find(|d| d.vendor_id() == vid && d.product_id() == pid)
 }
 
+fn matching_devices(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
+    let Ok(devices) = nusb::list_devices().wait() else {
+        return Vec::new();
+    };
+
+    devices
+        .filter(|d| d.vendor_id() == vid && pid.is_none_or(|expected| d.product_id() == expected))
+        .collect()
+}
+
+fn device_summary(info: &DeviceInfo) -> String {
+    format!(
+        "bus {} addr {} {:04x}:{:04x}",
+        info.bus_id(),
+        info.device_address(),
+        info.vendor_id(),
+        info.product_id(),
+    )
+}
+
+/// Select a unique USB device from one or more VID/PID selectors.
+///
+/// Returns `Ok(None)` when no device matches any selector, and returns an
+/// error when more than one device matches so the caller can ask the user to
+/// narrow the selection.
+pub(crate) fn select_unique_device(selectors: &[(u16, Option<u16>)]) -> Result<Option<DeviceInfo>> {
+    let mut matches = Vec::new();
+    for &(vid, pid) in selectors {
+        matches.extend(matching_devices(vid, pid));
+    }
+
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(matches.into_iter().next()),
+        _ => {
+            let devices = matches
+                .iter()
+                .map(device_summary)
+                .collect::<Vec<_>>()
+                .join("\n- ");
+            Err(anyhow!(
+                "Multiple matching USB devices are connected:\n- {devices}\nUse --vid/--pid to select one, or disconnect extra probes before retrying."
+            ))
+        }
+    }
+}
+
 /// Inspect the active USB configuration of the device at `vid`/`pid` and find
 /// the CDC-ACM control interface whose `iInterface` string descriptor contains
 /// "defmt" (case-insensitive).
@@ -74,7 +121,14 @@ pub fn find_device(vid: u16, pid: u16) -> Option<DeviceInfo> {
 /// interface labelled "defmt" — the caller should fall back to the port-name
 /// heuristic in that case.
 pub fn find_defmt_interface(vid: u16, pid: u16) -> Option<(u8, u8)> {
-    let device = find_device(vid, pid)?.open().wait().ok()?;
+    let device = find_device(vid, pid)?;
+    find_defmt_interface_on_device(&device)
+}
+
+/// Inspect a specific USB device and find the CDC-ACM control interface whose
+/// `iInterface` string descriptor contains "defmt" (case-insensitive).
+pub fn find_defmt_interface_on_device(device: &DeviceInfo) -> Option<(u8, u8)> {
+    let device = device.open().wait().ok()?;
     let config = device.active_configuration().ok()?;
 
     for iface in config.interface_alt_settings() {
@@ -175,7 +229,7 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    if let Some(info) = find_device(primary_vid, primary_pid) {
+    if let Some(info) = select_unique_device(&[(primary_vid, Some(primary_pid))])? {
         log::info!(
             "Found app-mode device {:04x}:{:04x} — sending reset interface request",
             primary_vid,
@@ -184,7 +238,7 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         return reboot_via_reset_interface(&info);
     }
 
-    if let Some(info) = find_device(primary_vid, PRODUCT_ID_RP_USBBOOT) {
+    if let Some(info) = select_unique_device(&[(primary_vid, Some(PRODUCT_ID_RP_USBBOOT))])? {
         log::info!(
             "Device {:04x}:{:04x} already in BOOTSEL — sending PC_REBOOT2",
             primary_vid,
@@ -195,15 +249,18 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
 
     // When the caller did not pin a specific VID, also probe the fallback vendors.
     if vid.is_none() {
-        for &fvid in FALLBACK_VIDS {
-            if let Some(info) = find_any_device_with_vid(fvid) {
-                log::info!(
-                    "Primary device not found; trying fallback {:04x}:{:04x}",
-                    info.vendor_id(),
-                    info.product_id()
-                );
-                return reboot_via_reset_interface(&info);
-            }
+        let fallback_selectors: Vec<(u16, Option<u16>)> = FALLBACK_VIDS
+            .iter()
+            .copied()
+            .map(|fvid| (fvid, None))
+            .collect();
+        if let Some(info) = select_unique_device(&fallback_selectors)? {
+            log::info!(
+                "Primary device not found; trying fallback {:04x}:{:04x}",
+                info.vendor_id(),
+                info.product_id()
+            );
+            return reboot_via_reset_interface(&info);
         }
     }
 
@@ -234,7 +291,7 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    if find_device(primary_vid, primary_pid).is_some() {
+    if select_unique_device(&[(primary_vid, Some(primary_pid))])?.is_some() {
         log::info!(
             "Device {:04x}:{:04x} already in normal application mode",
             primary_vid,
@@ -243,7 +300,7 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(info) = find_device(primary_vid, PRODUCT_ID_RP_USBBOOT) {
+    if let Some(info) = select_unique_device(&[(primary_vid, Some(PRODUCT_ID_RP_USBBOOT))])? {
         log::info!(
             "Device {:04x}:{:04x} in BOOTSEL — sending PC_REBOOT2 normal reboot",
             primary_vid,
@@ -254,24 +311,32 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
 
     // When the caller did not pin a specific VID, also probe the fallback vendors.
     if vid.is_none() {
-        for &fvid in FALLBACK_VIDS {
-            if let Some(info) = find_device(fvid, PRODUCT_ID_RP_USBBOOT) {
-                log::info!(
-                    "Primary device not found; rebooting fallback BOOTSEL device {:04x}:{:04x}",
-                    info.vendor_id(),
-                    info.product_id()
-                );
-                return reboot_to_normal_via_picoboot(&info);
-            }
+        let fallback_bootsel_selectors: Vec<(u16, Option<u16>)> = FALLBACK_VIDS
+            .iter()
+            .copied()
+            .map(|fvid| (fvid, Some(PRODUCT_ID_RP_USBBOOT)))
+            .collect();
+        if let Some(info) = select_unique_device(&fallback_bootsel_selectors)? {
+            log::info!(
+                "Primary device not found; rebooting fallback BOOTSEL device {:04x}:{:04x}",
+                info.vendor_id(),
+                info.product_id()
+            );
+            return reboot_to_normal_via_picoboot(&info);
+        }
 
-            if let Some(info) = find_any_device_with_vid(fvid) {
-                log::info!(
-                    "Fallback device {:04x}:{:04x} already in normal application mode",
-                    info.vendor_id(),
-                    info.product_id()
-                );
-                return Ok(());
-            }
+        let fallback_normal_selectors: Vec<(u16, Option<u16>)> = FALLBACK_VIDS
+            .iter()
+            .copied()
+            .map(|fvid| (fvid, None))
+            .collect();
+        if let Some(info) = select_unique_device(&fallback_normal_selectors)? {
+            log::info!(
+                "Fallback device {:04x}:{:04x} already in normal application mode",
+                info.vendor_id(),
+                info.product_id()
+            );
+            return Ok(());
         }
     }
 

@@ -467,18 +467,19 @@ fn resolve_port(
     if let Some(p) = port_override {
         return Ok(p);
     }
-    attach::find_serial_port(vid, pid).ok_or({
-        match vid {
+    match attach::find_serial_port(vid, pid)? {
+        Some(port) => Ok(port),
+        None => Err(match vid {
             None => anyhow::anyhow!(
-                "No serial port found for VID 0x2E8A (default) or VID 0xC0DE/0xC001 (fallback). \
-                 Is the device connected and running firmware?"
+                "No defmt CDC serial port found for VID 0x2E8A (default) or VID 0xC0DE/0xC001 (fallback). \
+                 If multiple serial paths exist, pass --port <PORT> to choose the defmt interface."
             ),
             Some(v) => anyhow::anyhow!(
-                "No serial port found for VID {:04x} and PID {:04x}. \
-                 Is the device connected and running firmware?",
+                "No defmt CDC serial port found for VID {:04x} and PID {:04x}. \
+                 If multiple serial paths exist, pass --port <PORT> to choose the defmt interface.",
                 v,
                 pid.unwrap_or(usb::DEFAULT_PID),
             ),
-        }
-    })
+        }),
+    }
 }

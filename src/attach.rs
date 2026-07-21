@@ -11,6 +11,14 @@ use std::time::{Duration, Instant};
 use crate::event::{EventCallback, LogTag, ProbeEvent};
 use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VIDS};
 
+#[derive(Clone)]
+struct PortCandidate {
+    vid: u16,
+    pid: u16,
+    interface: Option<u8>,
+    port_name: String,
+}
+
 /// Return a sort key that orders port names naturally, treating a trailing digit
 /// run as a number.  This ensures "COM10" sorts after "COM3" on Windows, and
 /// "/dev/ttyACM10" after "/dev/ttyACM2" on Linux.
@@ -49,70 +57,90 @@ fn find_port_by_interface(vid: u16, pid: u16, ctrl: u8, data: u8) -> Option<Stri
         })
 }
 
-/// Scan available serial ports, filter by VID and (optionally) PID, sort by name, return last.
-fn find_port_by_vid_pid(vid: u16, pid: Option<u16>) -> Option<String> {
-    let mut ports: Vec<String> = serialport::available_ports()
-        .ok()?
+/// Scan available serial ports and collect the USB ports matching a VID and
+/// optional PID.
+fn matching_ports_by_vid_pid(vid: u16, pid: Option<u16>) -> Vec<PortCandidate> {
+    let mut ports: Vec<PortCandidate> = serialport::available_ports()
+        .ok()
         .into_iter()
+        .flatten()
         .filter_map(|p| {
             if let SerialPortType::UsbPort(info) = &p.port_type {
                 let vid_ok = info.vid == vid;
                 let pid_ok = pid.is_none_or(|expected| info.pid == expected);
                 if vid_ok && pid_ok {
-                    return Some(p.port_name);
+                    return Some(PortCandidate {
+                        vid: info.vid,
+                        pid: info.pid,
+                        interface: info.interface,
+                        port_name: p.port_name,
+                    });
                 }
             }
             None
         })
         .collect();
-    ports.sort_by_key(|p| port_sort_key(p));
-    ports.into_iter().last()
+    ports.sort_by_key(|p| port_sort_key(&p.port_name));
+    ports
 }
 
 /// Find the serial port for defmt output, using the most specific method available.
 ///
 /// Discovery order:
-/// 1. **Interface string descriptor** (robust): open the USB device, find the
-///    CDC-ACM interface whose `iInterface` string contains "defmt", and return
-///    the OS serial-port name bound to that exact interface.  Requires the
-///    firmware to label the interface (e.g. `iInterface = "defmt"`) and, on
-///    Windows, the WinUSB driver to be installed for the device.
-/// 2. **VID/PID heuristic** (fallback): pick the highest-numbered serial port
-///    matching the given VID/PID by natural sort.  Works without string
-///    descriptors but relies on the defmt port being the last enumerated one.
-/// 3. **Fallback VID `0xC0DE`** (fallback, only when `--vid` is not set).
-pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Option<String> {
+/// 1. **Exact defmt CDC interface**: open the USB device, find the CDC-ACM
+///    interface whose `iInterface` string contains "defmt", and return the OS
+///    serial-port name bound to that exact interface.  Requires the firmware to
+///    label the interface (e.g. `iInterface = "defmt"`) and, on Windows, the
+///    WinUSB driver to be installed for the device.
+/// 2. **Fallback VID `0xC0DE` / `0xC001`** (fallback, only when `--vid` is not set).
+pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Result<Option<String>> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    // 1. Interface string descriptor — precise, platform-agnostic.
-    if let Some((ctrl, data)) = usb::find_defmt_interface(primary_vid, primary_pid)
-        && let Some(port) = find_port_by_interface(primary_vid, primary_pid, ctrl, data)
-    {
-        return Some(port);
-    }
-    // Descriptor found but port not yet visible (device still enumerating) —
-    // fall through so the heuristic can retry on the next poll cycle.
+    let mut candidates = matching_ports_by_vid_pid(primary_vid, Some(primary_pid));
 
-    // 2. VID/PID heuristic.
-    if let Some(port) = find_port_by_vid_pid(primary_vid, Some(primary_pid)) {
-        return Some(port);
-    }
-
-    // 3. Fallback VIDs.
     if vid.is_none() {
         for &fvid in FALLBACK_VIDS {
-            if let Some(port) = find_port_by_vid_pid(fvid, None) {
-                log::info!(
-                    "Primary serial port not found; using fallback VID {:04x}",
-                    fvid
-                );
-                return Some(port);
-            }
+            candidates.extend(matching_ports_by_vid_pid(fvid, None));
         }
     }
 
-    None
+    candidates.dedup_by(|a, b| a.port_name == b.port_name);
+
+    if candidates.len() > 1 {
+        let ports = candidates
+            .iter()
+            .map(|candidate| {
+                let interface = candidate
+                    .interface
+                    .map(|n| format!(", interface {n}"))
+                    .unwrap_or_default();
+                format!(
+                    "{} ({:04x}:{:04x}{interface})",
+                    candidate.port_name,
+                    candidate.vid,
+                    candidate.pid,
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        anyhow::bail!(
+            "Multiple serial ports match the connected probe(s): {ports}. Use --port <PORT> to choose the defmt CDC port you want."
+        );
+    }
+
+    let Some(candidate) = candidates.into_iter().next() else {
+        return Ok(None);
+    };
+
+    // 1. Interface string descriptor — precise, platform-agnostic.
+    if let Some((ctrl, data)) = usb::find_defmt_interface(candidate.vid, candidate.pid)
+        && let Some(port) = find_port_by_interface(candidate.vid, candidate.pid, ctrl, data)
+    {
+        return Ok(Some(port));
+    }
+
+    Ok(None)
 }
 
 /// Load the defmt `Table` from an ELF file.
@@ -268,7 +296,7 @@ pub fn watch(
 
         let port_name = match port_override.as_deref() {
             Some(p) => p.to_owned(),
-            None => match wait_for_serial_port(vid, pid, Duration::from_secs(30), &stop_flag) {
+            None => match wait_for_serial_port(vid, pid, Duration::from_secs(30), &stop_flag)? {
                 Some(p) => p,
                 None => {
                     // Either timed out or stop_flag was set.
@@ -340,19 +368,19 @@ fn wait_for_serial_port(
     pid: Option<u16>,
     timeout: Duration,
     stop_flag: &Option<Arc<AtomicBool>>,
-) -> Option<String> {
+) -> Result<Option<String>> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
         if stop_flag
             .as_ref()
             .is_some_and(|f| f.load(Ordering::Relaxed))
         {
-            return None;
+            return Ok(None);
         }
-        if let Some(port) = find_serial_port(vid, pid) {
-            return Some(port);
+        if let Some(port) = find_serial_port(vid, pid)? {
+            return Ok(Some(port));
         }
         std::thread::sleep(Duration::from_millis(500));
     }
-    None
+    Ok(None)
 }

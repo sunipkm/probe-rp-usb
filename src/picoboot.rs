@@ -5,7 +5,7 @@ use nusb::{DeviceInfo, Interface, MaybeFuture};
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use crate::usb::{DEFAULT_VID, FALLBACK_VIDS, find_device, reset_to_bootsel};
+use crate::usb::{DEFAULT_VID, FALLBACK_VIDS, reset_to_bootsel, select_unique_device};
 
 /// BOOTSEL/PICOBOOT product ID for RP2xxx boot ROM devices.
 pub const PRODUCT_ID_RP_USBBOOT: u16 = 0x000F;
@@ -69,7 +69,7 @@ impl PicobootConnection {
 
     pub fn open(vid: Option<u16>) -> Result<Self> {
         let vid = vid.unwrap_or(DEFAULT_VID);
-        let info = find_device(vid, PRODUCT_ID_RP_USBBOOT).ok_or_else(|| {
+        let info = select_unique_device(&[(vid, Some(PRODUCT_ID_RP_USBBOOT))])?.ok_or_else(|| {
             anyhow!(
                 "No BOOTSEL/PICOBOOT device found at {:04x}:{:04x}",
                 vid,
@@ -80,15 +80,18 @@ impl PicobootConnection {
     }
 
     fn try_open_candidates(vid: Option<u16>) -> Result<Option<Self>> {
-        let mut vids = vec![vid.unwrap_or(DEFAULT_VID)];
+        let mut selectors = vec![(vid.unwrap_or(DEFAULT_VID), Some(PRODUCT_ID_RP_USBBOOT))];
         if vid.is_none() {
-            vids.extend_from_slice(FALLBACK_VIDS);
+            selectors.extend(
+                FALLBACK_VIDS
+                    .iter()
+                    .copied()
+                    .map(|candidate_vid| (candidate_vid, Some(PRODUCT_ID_RP_USBBOOT))),
+            );
         }
 
-        for candidate_vid in vids {
-            if let Some(info) = find_device(candidate_vid, PRODUCT_ID_RP_USBBOOT) {
-                return Self::open_device(&info).map(Some);
-            }
+        if let Some(info) = select_unique_device(&selectors)? {
+            return Self::open_device(&info).map(Some);
         }
 
         Ok(None)
