@@ -69,13 +69,14 @@ impl PicobootConnection {
 
     pub fn open(vid: Option<u16>) -> Result<Self> {
         let vid = vid.unwrap_or(DEFAULT_VID);
-        let info = select_unique_device(&[(vid, Some(PRODUCT_ID_RP_USBBOOT))])?.ok_or_else(|| {
-            anyhow!(
-                "No BOOTSEL/PICOBOOT device found at {:04x}:{:04x}",
-                vid,
-                PRODUCT_ID_RP_USBBOOT
-            )
-        })?;
+        let info =
+            select_unique_device(&[(vid, Some(PRODUCT_ID_RP_USBBOOT))])?.ok_or_else(|| {
+                anyhow!(
+                    "No BOOTSEL/PICOBOOT device found at {:04x}:{:04x}",
+                    vid,
+                    PRODUCT_ID_RP_USBBOOT
+                )
+            })?;
         Self::open_device(&info)
     }
 

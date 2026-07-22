@@ -3,6 +3,8 @@ use probe_rp_usb::{attach, bootsel, flash, ui, usb, write};
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use probe_rp_usb::Family;
+use std::fs::File;
+use std::io::Read;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -36,6 +38,17 @@ fn parse_write_target(s: &str) -> Result<write::WriteTarget, String> {
         path: PathBuf::from(path_part),
         address,
     })
+}
+
+fn ensure_elf_input(path: &PathBuf) -> Result<()> {
+    let mut input_file = File::open(path)?;
+    let mut magic = [0u8; 4];
+    let is_elf = input_file.read(&mut magic)? == 4 && magic == [0x7F, b'E', b'L', b'F'];
+    if is_elf {
+        Ok(())
+    } else {
+        anyhow::bail!("flash only accepts ELF firmware images; use `write` for raw binary blobs")
+    }
 }
 
 #[derive(Parser)]
@@ -74,8 +87,9 @@ struct Cli {
     command: Cmd,
 }
 
-#[derive(Clone, Copy, Debug, ValueEnum)]
+#[derive(Clone, Copy, Debug, ValueEnum, Default)]
 enum Backend {
+    #[default]
     Picoboot,
     Uf2,
 }
@@ -92,20 +106,16 @@ enum Cmd {
         normal: bool,
     },
 
-    /// Flash an ELF or raw binary to the device
+    /// Flash an ELF firmware image to the device
     ///
     /// If needed, the device is reset automatically before flashing.
     Flash {
-        /// Input firmware file (ELF detected by magic bytes; anything else treated as raw binary)
+        /// Input firmware file (must be an ELF built with defmt)
         input: PathBuf,
 
         /// UF2 family to embed in the UF2 blocks
-        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        #[arg(long, value_enum, default_value = "rp2xxx-absolute")]
         family: Family,
-
-        /// Flash base address used when the input is a raw binary (ignored for ELF)
-        #[arg(long, value_parser = parse_u32_hex, default_value = "0x10000000")]
-        address: u32,
 
         /// Do not wait for the device to reboot after flashing (leaves device in BOOTSEL mode).
         /// Useful when writing data partitions that should not trigger a firmware reset.
@@ -135,7 +145,7 @@ enum Cmd {
         base: u32,
 
         /// UF2 family to embed in the UF2 blocks
-        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        #[arg(long, value_enum, default_value = "rp2xxx-absolute")]
         family: Family,
 
         /// Prepend a 256-byte block of 0xFF at 0x10000000 (the start of flash)
@@ -194,7 +204,7 @@ enum Cmd {
         input: PathBuf,
 
         /// UF2 family to embed in the UF2 blocks
-        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        #[arg(long, value_enum, default_value = "rp2xxx-absolute")]
         family: Family,
 
         /// Flash base address used when the input is a raw binary (ignored for ELF)
@@ -225,7 +235,7 @@ enum Cmd {
         base: u32,
 
         /// UF2 family to embed in the UF2 blocks
-        #[arg(long, value_enum, default_value = "rp2350-arm-s")]
+        #[arg(long, value_enum, default_value = "rp2xxx-absolute")]
         family: Family,
 
         /// Do not wait for the device to reboot after erasing (leaves device in BOOTSEL mode).
@@ -274,31 +284,34 @@ fn run(cli: Cli) -> Result<()> {
         Cmd::Flash {
             input,
             family,
-            address,
             no_wait,
             backend,
-        } => match backend {
-            Backend::Picoboot => flash::flash(
-                &input,
-                family,
-                address,
-                cli.vid,
-                cli.pid,
-                cli.bootsel_timeout,
-                no_wait,
-                None,
-            )?,
-            Backend::Uf2 => flash::flash_uf2(
-                &input,
-                family,
-                address,
-                cli.vid,
-                cli.pid,
-                cli.bootsel_timeout,
-                no_wait,
-                None,
-            )?,
-        },
+        } => {
+            ensure_elf_input(&input)?;
+
+            match backend {
+                Backend::Picoboot => flash::flash(
+                    &input,
+                    family,
+                    0,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    no_wait,
+                    None,
+                )?,
+                Backend::Uf2 => flash::flash_uf2(
+                    &input,
+                    family,
+                    0,
+                    cli.vid,
+                    cli.pid,
+                    cli.bootsel_timeout,
+                    no_wait,
+                    None,
+                )?,
+            }
+        }
 
         Cmd::Write {
             targets,

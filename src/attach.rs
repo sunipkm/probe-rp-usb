@@ -117,9 +117,7 @@ pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Result<Option<Str
                     .unwrap_or_default();
                 format!(
                     "{} ({:04x}:{:04x}{interface})",
-                    candidate.port_name,
-                    candidate.vid,
-                    candidate.pid,
+                    candidate.port_name, candidate.vid, candidate.pid,
                 )
             })
             .collect::<Vec<_>>()
