@@ -107,6 +107,27 @@ pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Result<Option<Str
 
     candidates.dedup_by(|a, b| a.port_name == b.port_name);
 
+    if candidates.is_empty() {
+        return Ok(None);
+    }
+
+    // 1. Interface string descriptor — precise, platform-agnostic.
+    // Try this FIRST so we can select the correct port even when the device
+    // exposes multiple CDC serial interfaces (e.g. one labelled "defmt" and
+    // one for a REPL or console).
+    {
+        let mut seen = std::collections::HashSet::new();
+        for c in &candidates {
+            if seen.insert((c.vid, c.pid))
+                && let Some((ctrl, data)) = usb::find_defmt_interface(c.vid, c.pid)
+                && let Some(port) = find_port_by_interface(c.vid, c.pid, ctrl, data)
+            {
+                return Ok(Some(port));
+            }
+        }
+    }
+
+    // 2. Fallback: USB string lookup did not resolve a port — error when ambiguous.
     if candidates.len() > 1 {
         let ports = candidates
             .iter()
@@ -123,22 +144,13 @@ pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Result<Option<Str
             .collect::<Vec<_>>()
             .join(", ");
         anyhow::bail!(
-            "Multiple serial ports match the connected probe(s): {ports}. Use --port <PORT> to choose the defmt CDC port you want."
+            "Multiple serial ports match the connected probe(s): {ports}. \
+             Label the defmt CDC interface \"defmt\" in firmware for automatic \
+             selection, or use --port <PORT> to choose manually."
         );
     }
 
-    let Some(candidate) = candidates.into_iter().next() else {
-        return Ok(None);
-    };
-
-    // 1. Interface string descriptor — precise, platform-agnostic.
-    if let Some((ctrl, data)) = usb::find_defmt_interface(candidate.vid, candidate.pid)
-        && let Some(port) = find_port_by_interface(candidate.vid, candidate.pid, ctrl, data)
-    {
-        return Ok(Some(port));
-    }
-
-    Ok(None)
+    Ok(candidates.into_iter().next().map(|c| c.port_name))
 }
 
 /// Load the defmt `Table` from an ELF file.
