@@ -2,6 +2,11 @@
 name = "probe-rp-usb"
 version = "0.0.1"
 edition = "2024"
+authors = ["Sunip K. Mukehrjee <sunipkmukherjee@gmail.com>"]
+description = "A Rust library and binary to program and debug Raspberry Pi RP2XXX microcontrollers over USB."
+license = "MIT"
+repository = "https://github.com/sunipkm/probe-rp-usb"
+documentation = "https://docs.rs/probe-rp-usb"
 
 [[bin]]
 name = "probe-rp-usb"
