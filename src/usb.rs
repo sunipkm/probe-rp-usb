@@ -53,17 +53,17 @@ const RESET_INTERFACE_SUBCLASS: u8 = 0x00;
 const RESET_INTERFACE_PROTOCOL: u8 = 0x01;
 const RESET_REQUEST_BOOTSEL: u8 = 0x01;
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn upper_opt(s: &Option<String>) -> String {
     s.as_deref().unwrap_or_default().to_ascii_uppercase()
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn is_bootsel_device(device: &wdi_rs::Device, primary_vid: u16) -> bool {
     device.vid == primary_vid && device.pid == PRODUCT_ID_RP_USBBOOT
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn matches_known_probe_id(
     device: &wdi_rs::Device,
     primary_vid: u16,
@@ -75,7 +75,7 @@ fn matches_known_probe_id(
         || (allow_fallback_vids && FALLBACK_VIDS.contains(&device.vid))
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn looks_like_reset_signature(device: &wdi_rs::Device) -> bool {
     let hardware = upper_opt(&device.hardware_id);
     let compat = upper_opt(&device.compatible_id);
@@ -95,7 +95,7 @@ fn looks_like_reset_signature(device: &wdi_rs::Device) -> bool {
     mentions_reset || (class_ff && subclass_00 && prot_01)
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn looks_like_cdc_acm(device: &wdi_rs::Device) -> bool {
     let hardware = upper_opt(&device.hardware_id);
     let compat = upper_opt(&device.compatible_id);
@@ -107,7 +107,7 @@ fn looks_like_cdc_acm(device: &wdi_rs::Device) -> bool {
     (class_02 && subclass_02) || desc.contains("CDC") || desc.contains("ACM")
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn looks_like_picotool_interface(
     device: &wdi_rs::Device,
     primary_vid: u16,
@@ -138,7 +138,7 @@ fn looks_like_picotool_interface(
     hardware.contains("CLASS_FF") || compat.contains("CLASS_FF") || has_interface_id
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn is_bootsel_mass_storage(device: &wdi_rs::Device, primary_vid: u16) -> bool {
     if !is_bootsel_device(device, primary_vid) {
         return false;
@@ -154,7 +154,7 @@ fn is_bootsel_mass_storage(device: &wdi_rs::Device, primary_vid: u16) -> bool {
         || compat.contains("CLASS_08")
 }
 
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 fn summarize_wdi_device(device: &wdi_rs::Device) -> String {
     let desc = device.desc.as_deref().unwrap_or("(no description)");
     let driver = device.driver.as_deref().unwrap_or("(none)");
@@ -171,7 +171,7 @@ fn summarize_wdi_device(device: &wdi_rs::Device) -> String {
 /// This installs WinUSB only for devices with no suitable driver bound yet. If
 /// Windows already bound BOOTSEL to USB mass storage (`USBSTOR`), that is left
 /// untouched and not treated as an installation failure.
-#[cfg(all(feature = "wdi", target_os="windows"))]
+#[cfg(all(feature = "wdi", target_os = "windows"))]
 pub fn ensure_winusb_driver(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     use wdi_rs::{CreateListOptions, DriverInstaller, DriverType, Error as WdiError, create_list};
 
@@ -259,7 +259,7 @@ pub fn ensure_winusb_driver(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     )
 }
 
-#[cfg(not(all(feature = "wdi", target_os="windows")))]
+#[cfg(not(all(feature = "wdi", target_os = "windows")))]
 pub fn ensure_winusb_driver(_vid: Option<u16>, _pid: Option<u16>) -> Result<()> {
     Ok(())
 }
@@ -272,14 +272,16 @@ pub fn find_device(vid: u16, pid: u16) -> Option<DeviceInfo> {
         .find(|d| d.vendor_id() == vid && d.product_id() == pid)
 }
 
-fn matching_devices(vid: u16, pid: Option<u16>) -> Vec<DeviceInfo> {
-    let Ok(devices) = nusb::list_devices().wait() else {
-        return Vec::new();
-    };
+fn matching_devices(vid: u16, pid: Option<u16>) -> Result<Vec<DeviceInfo>> {
+    let devices = nusb::list_devices()
+        .wait()
+        .map_err(|e| anyhow!("Failed to enumerate USB devices: {e}"))?;
 
-    devices
+    let matches = devices
         .filter(|d| d.vendor_id() == vid && pid.is_none_or(|expected| d.product_id() == expected))
-        .collect()
+        .collect();
+
+    Ok(matches)
 }
 
 fn device_summary(info: &DeviceInfo) -> String {
@@ -300,7 +302,7 @@ fn device_summary(info: &DeviceInfo) -> String {
 pub(crate) fn select_unique_device(selectors: &[(u16, Option<u16>)]) -> Result<Option<DeviceInfo>> {
     let mut matches = Vec::new();
     for &(vid, pid) in selectors {
-        matches.extend(matching_devices(vid, pid));
+        matches.extend(matching_devices(vid, pid)?);
     }
 
     match matches.len() {

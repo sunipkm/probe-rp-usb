@@ -465,8 +465,20 @@ fn run(cli: Cli) -> Result<()> {
 #[cfg(target_os = "linux")]
 fn is_permission_error(e: &anyhow::Error) -> bool {
     e.chain().any(|cause| {
+        if let Some(ioe) = cause.downcast_ref::<std::io::Error>()
+            && ioe.kind() == std::io::ErrorKind::PermissionDenied
+        {
+            return true;
+        }
+
         let msg = cause.to_string();
-        msg.contains("Permission denied") || msg.contains("Access denied")
+        let lower = msg.to_ascii_lowercase();
+        lower.contains("permission denied")
+            || lower.contains("access denied")
+            || lower.contains("operation not permitted")
+            || lower.contains("eacces")
+            || lower.contains("eperm")
+            || lower.contains("libusb_error_access")
     })
 }
 

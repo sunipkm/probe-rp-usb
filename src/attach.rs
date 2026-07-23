@@ -59,11 +59,10 @@ fn find_port_by_interface(vid: u16, pid: u16, ctrl: u8, data: u8) -> Option<Stri
 
 /// Scan available serial ports and collect the USB ports matching a VID and
 /// optional PID.
-fn matching_ports_by_vid_pid(vid: u16, pid: Option<u16>) -> Vec<PortCandidate> {
+fn matching_ports_by_vid_pid(vid: u16, pid: Option<u16>) -> Result<Vec<PortCandidate>> {
     let mut ports: Vec<PortCandidate> = serialport::available_ports()
-        .ok()
+        .context("Failed to enumerate serial ports")?
         .into_iter()
-        .flatten()
         .filter_map(|p| {
             if let SerialPortType::UsbPort(info) = &p.port_type {
                 let vid_ok = info.vid == vid;
@@ -81,7 +80,7 @@ fn matching_ports_by_vid_pid(vid: u16, pid: Option<u16>) -> Vec<PortCandidate> {
         })
         .collect();
     ports.sort_by_key(|p| port_sort_key(&p.port_name));
-    ports
+    Ok(ports)
 }
 
 /// Find the serial port for defmt output, using the most specific method available.
@@ -97,11 +96,11 @@ pub fn find_serial_port(vid: Option<u16>, pid: Option<u16>) -> Result<Option<Str
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    let mut candidates = matching_ports_by_vid_pid(primary_vid, Some(primary_pid));
+    let mut candidates = matching_ports_by_vid_pid(primary_vid, Some(primary_pid))?;
 
     if vid.is_none() {
         for &fvid in FALLBACK_VIDS {
-            candidates.extend(matching_ports_by_vid_pid(fvid, None));
+            candidates.extend(matching_ports_by_vid_pid(fvid, None)?);
         }
     }
 

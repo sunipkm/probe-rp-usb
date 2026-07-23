@@ -3,7 +3,7 @@
 //! Exposes the core USB, serial, flash, and UF2 operations so they can be
 //! embedded in other tools without going through the command-line interface.
 //!
-//! Firmware targeted by `probe-rp-usb` should use the 
+//! Firmware targeted by `probe-rp-usb` should use the
 //! [`rp-usb-reset`](https://crates.io/crates/rp-usb-reset) crate to
 //! expose the expected USB reset interface. This keeps reset behavior
 //! compatible with `probe-rp-usb` and, in normal Windows setups, removes the
