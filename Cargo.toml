@@ -26,7 +26,10 @@ thiserror = "2"
 supports-unicode = "3.0.0"
 
 [target.'cfg(windows)'.dependencies]
-wdi-rs = "0.1"
+wdi-rs = { version = "0.1", optional = true }
+
+[features]
+wdi = ["dep:wdi-rs"]
 
 [build-dependencies]
 vergen-git2 = "10"
