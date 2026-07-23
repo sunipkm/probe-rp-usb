@@ -9,6 +9,11 @@ The firmware exposes a vendor reset interface (so the host can reboot the device
 into BOOTSEL mode on demand) and routes `defmt` log output over a second USB
 CDC-ACM serial port.  `probe-rp-usb` drives the full workflow:
 
+Firmware intended to work with `probe-rp-usb` should use the
+`rp-usb-reset` crate to create that USB reset interface correctly. Doing so
+keeps the reset interface compatible with `probe-rp-usb` and avoids the manual
+Zadig driver-install step on Windows.
+
 `flash new firmware` &rarr; `wait for reboot` &rarr; `stream & decode defmt logs`
 
 all from one command, over the same USB cable that powers the board.
@@ -49,7 +54,7 @@ Options can be passed via environment variables or flags:
 
 | Option | Description |
 |--------|-------------|
-| `--version <tag>` | Install a specific release tag (e.g. `v0.2.0`) |
+| `--version <tag>` | Install a specific release tag (e.g. `v0.1.0`) |
 | `--no-modify-path` | Skip adding the binary to `PATH` |
 | `--verbose` / `--quiet` | Control output verbosity |
 
@@ -123,6 +128,11 @@ The `reset` and `flash` subcommands send vendor control transfers or PICOBOOT
 commands over USB. On Windows, `probe-rp-usb` now attempts to install a
 WinUSB binding automatically when it detects a matching reset or PICOBOOT
 interface that has no suitable driver yet.
+
+For firmware you control, prefer using the [`rp-usb-reset`](https://crates.io/crates/rp-usb-reset)
+crate to expose the reset interface expected by `probe-rp-usb`. 
+That is the recommended setup for firmware targeted by this tool, and in the 
+normal case it removes the need to install a driver manually with Zadig.
 
 If Windows prompts for elevation, rerun from an Administrator shell.
 
