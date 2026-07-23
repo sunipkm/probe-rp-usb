@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use crate::event::{EventCallback, LogTag, ProbeEvent};
+use crate::event::{EventCallback, LogTag, ProbeEvent, use_terminal_output};
 use crate::usb::{self, DEFAULT_PID, DEFAULT_VID, FALLBACK_VIDS};
 
 #[derive(Clone)]
@@ -223,7 +223,8 @@ fn drain_frames(
                 let text = frame.display(true).to_string();
                 match on_event {
                     Some(cb) => cb(ProbeEvent::Frame(text)),
-                    None => println!("{}", text),
+                    None if use_terminal_output(on_event) => println!("{}", text),
+                    None => {}
                 }
             }
             Err(DecodeError::UnexpectedEof) => break,
@@ -265,7 +266,10 @@ pub fn attach(
         Some(cb) => cb(ProbeEvent::Connected {
             port: port_name.to_owned(),
         }),
-        None => println!("Attached to {} (Ctrl+C to quit)", port_name),
+        None if use_terminal_output(&on_event) => {
+            println!("Attached to {} (Ctrl+C to quit)", port_name)
+        }
+        None => {}
     }
     run_decode_loop(
         &table,
@@ -333,7 +337,8 @@ pub fn watch(
                             msg,
                             tag: LogTag::Warn,
                         }),
-                        None => eprintln!("{}", msg),
+                        None if use_terminal_output(&on_event) => eprintln!("{}", msg),
+                        None => {}
                     }
                     continue;
                 }
@@ -344,7 +349,8 @@ pub fn watch(
             Some(cb) => cb(ProbeEvent::Connected {
                 port: port_name.clone(),
             }),
-            None => println!("Connecting to {}...", port_name),
+            None if use_terminal_output(&on_event) => println!("Connecting to {}...", port_name),
+            None => {}
         }
 
         match run_decode_loop(
@@ -359,7 +365,8 @@ pub fn watch(
             Err(e) => {
                 match &on_event {
                     Some(cb) => cb(ProbeEvent::Disconnected),
-                    None => eprintln!("Disconnected: {:#}", e),
+                    None if use_terminal_output(&on_event) => eprintln!("Disconnected: {:#}", e),
+                    None => {}
                 }
                 if port_override.is_some() {
                     std::thread::sleep(Duration::from_secs(1));

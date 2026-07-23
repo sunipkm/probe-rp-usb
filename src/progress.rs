@@ -5,9 +5,10 @@
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::io::{self, Write};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::event::{EventCallback, LogTag, ProbeEvent};
+use crate::event::{EventCallback, LogTag, ProbeEvent, use_terminal_output};
 
 /// Abstracts over indicatif progress bars (CLI mode) and event callbacks
 /// (library-consumer mode).
@@ -25,21 +26,35 @@ pub(crate) enum ProgressReporter {
     },
 }
 
+fn noop_callback() -> EventCallback {
+    Arc::new(|_evt: ProbeEvent| {})
+}
+
 impl ProgressReporter {
     /// Determinate reporter for a known total byte count.
     pub(crate) fn progress(on_event: &Option<EventCallback>, total: u64) -> Self {
+        Self::progress_with_label(on_event, total, "Writing UF2")
+    }
+
+    /// Determinate reporter for a known total byte count with a custom label.
+    pub(crate) fn progress_with_label(
+        on_event: &Option<EventCallback>,
+        total: u64,
+        label: &str,
+    ) -> Self {
         match on_event {
             Some(cb) => ProgressReporter::Callback {
                 written: 0,
                 total: Some(total),
                 cb: cb.clone(),
             },
-            None => {
+            None if use_terminal_output(on_event) => {
                 let bar = ProgressBar::new(total);
                 bar.set_style(
-                    ProgressStyle::with_template(
-                        "  Writing UF2  [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({eta})",
-                    )
+                    ProgressStyle::with_template(&format!(
+                        "  {}  [{{bar:40.cyan/blue}}] {{bytes}}/{{total_bytes}} ({{eta}})",
+                        label
+                    ))
                     .unwrap()
                     .progress_chars(
                         "\u{2588}\u{2589}\u{258a}\u{258b}\u{258c}\u{258d}\u{258e}\u{258f} ",
@@ -47,6 +62,11 @@ impl ProgressReporter {
                 );
                 ProgressReporter::Bar(bar)
             }
+            None => ProgressReporter::Callback {
+                written: 0,
+                total: Some(total),
+                cb: noop_callback(),
+            },
         }
     }
 
@@ -58,7 +78,7 @@ impl ProgressReporter {
                 total: None,
                 cb: cb.clone(),
             },
-            None => {
+            None if use_terminal_output(on_event) => {
                 let bar = ProgressBar::new_spinner();
                 bar.enable_steady_tick(Duration::from_millis(80));
                 bar.set_style(
@@ -68,6 +88,11 @@ impl ProgressReporter {
                 );
                 ProgressReporter::Bar(bar)
             }
+            None => ProgressReporter::Callback {
+                written: 0,
+                total: None,
+                cb: noop_callback(),
+            },
         }
     }
 

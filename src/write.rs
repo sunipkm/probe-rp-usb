@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::event::{EventCallback, LogTag, report};
+use crate::event::{EventCallback, LogTag, report, use_terminal_output};
 use crate::progress::{ProgressReporter, ProgressWriter};
 use crate::uf2::Family;
 use crate::{bootsel, picoboot::PicobootConnection, uf2, ui, usb};
@@ -260,7 +260,7 @@ pub fn read_flash(
 
     let out_file = File::create(output)
         .with_context(|| format!("Failed to create output file {}", output.display()))?;
-    let reporter = ProgressReporter::progress(&on_event, length as u64);
+    let reporter = ProgressReporter::progress_with_label(&on_event, length as u64, "Reading flash");
     let finish_rpt = reporter.clone();
     let mut writer = ProgressWriter::new(out_file, reporter);
 
@@ -280,7 +280,7 @@ pub fn read_flash(
     }
 
     finish_rpt.finish("Flash read complete");
-    if on_event.is_none() {
+    if use_terminal_output(&on_event) {
         println!("Read {} bytes to {}", length, output.display());
     } else {
         report(
@@ -306,7 +306,7 @@ fn open_picoboot(
     on_event: &Option<EventCallback>,
 ) -> Result<PicobootConnection> {
     report(on_event, "Opening PICOBOOT interface", LogTag::Info);
-    let spinner = if on_event.is_none() {
+    let spinner = if use_terminal_output(on_event) {
         Some(ui::spinner("Opening PICOBOOT interface..."))
     } else {
         None
@@ -348,14 +348,14 @@ fn run_picoboot_write(
     finish_rpt.finish("Flash written");
 
     if no_wait {
-        if on_event.is_some() {
+        if use_terminal_output(on_event) {
+            println!("Write complete (device left in BOOTSEL mode)");
+        } else {
             report(
                 on_event,
                 "Write complete (device left in BOOTSEL mode)",
                 LogTag::Ok,
             );
-        } else {
-            println!("Write complete (device left in BOOTSEL mode)");
         }
         return Ok(());
     }
@@ -363,10 +363,10 @@ fn run_picoboot_write(
     connection
         .reboot_flash_update(first_addr.unwrap_or(0x1000_0000))
         .context("Failed to reboot device after write")?;
-    if on_event.is_some() {
-        report(on_event, "Write complete", LogTag::Ok);
-    } else {
+    if use_terminal_output(on_event) {
         println!("Write complete");
+    } else {
+        report(on_event, "Write complete", LogTag::Ok);
     }
     Ok(())
 }
@@ -400,14 +400,14 @@ fn run_picoboot_erase(
 
     finish_rpt.finish("Flash erased");
     if no_wait {
-        if on_event.is_some() {
+        if use_terminal_output(on_event) {
+            println!("Erase complete (device left in BOOTSEL mode)");
+        } else {
             report(
                 on_event,
                 "Erase complete (device left in BOOTSEL mode)",
                 LogTag::Ok,
             );
-        } else {
-            println!("Erase complete (device left in BOOTSEL mode)");
         }
         return Ok(());
     }
@@ -415,10 +415,10 @@ fn run_picoboot_erase(
     connection
         .reboot_application()
         .context("Failed to reboot device after erase")?;
-    if on_event.is_some() {
-        report(on_event, "Erase complete", LogTag::Ok);
-    } else {
+    if use_terminal_output(on_event) {
         println!("Erase complete");
+    } else {
+        report(on_event, "Erase complete", LogTag::Ok);
     }
     Ok(())
 }
@@ -535,7 +535,7 @@ fn run_uf2_write(
                 LogTag::Info,
             );
             usb::reset_to_bootsel(vid, pid)?;
-            let maybe_spin = if on_event.is_none() {
+            let maybe_spin = if use_terminal_output(on_event) {
                 Some(ui::spinner("Waiting for BOOTSEL drive\u{2026}"))
             } else {
                 report(on_event, "Waiting for BOOTSEL drive\u{2026}", LogTag::Info);
@@ -585,19 +585,19 @@ fn run_uf2_write(
 
     if no_wait {
         log::info!("--no-wait: skipping reboot wait");
-        if on_event.is_some() {
+        if use_terminal_output(on_event) {
+            println!("{op_name} complete (device left in BOOTSEL mode)");
+        } else {
             report(
                 on_event,
                 format!("{op_name} complete (device left in BOOTSEL mode)"),
                 LogTag::Ok,
             );
-        } else {
-            println!("{op_name} complete (device left in BOOTSEL mode)");
         }
         return Ok(());
     }
 
-    let maybe_spin2 = if on_event.is_none() {
+    let maybe_spin2 = if use_terminal_output(on_event) {
         Some(ui::spinner("Waiting for device to reboot\u{2026}"))
     } else {
         report(

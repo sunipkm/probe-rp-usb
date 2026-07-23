@@ -21,6 +21,9 @@
 //!     false, // no_wait: wait for device reboot
 //!     None,  // event callback
 //! ).unwrap();
+//!
+//! // Optional: suppress default terminal output when embedding as a library.
+//! probe_rp_usb::event::set_silent_output(true);
 //! ```
 
 pub mod attach;

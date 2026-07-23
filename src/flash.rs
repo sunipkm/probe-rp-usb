@@ -4,7 +4,7 @@ use std::io::{BufReader, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 use std::time::Duration;
 
-use crate::event::{EventCallback, LogTag, report};
+use crate::event::{EventCallback, LogTag, report, use_terminal_output};
 use crate::progress::{ProgressReporter, ProgressWriter};
 use crate::uf2::Family;
 use crate::{bootsel, elf, uf2, ui, usb, write};
@@ -120,7 +120,7 @@ pub fn flash_uf2(
                 LogTag::Info,
             );
             usb::reset_to_bootsel(vid, pid)?;
-            let maybe_spin = if on_event.is_none() {
+            let maybe_spin = if use_terminal_output(&on_event) {
                 Some(ui::spinner("Waiting for BOOTSEL drive\u{2026}"))
             } else {
                 report(&on_event, "Waiting for BOOTSEL drive\u{2026}", LogTag::Info);
@@ -232,19 +232,19 @@ pub fn flash_uf2(
 
     if no_wait {
         log::info!("--no-wait: skipping reboot wait");
-        if on_event.is_some() {
+        if use_terminal_output(&on_event) {
+            println!("Flash complete (device left in BOOTSEL mode)");
+        } else {
             report(
                 &on_event,
                 "Flash complete (device left in BOOTSEL mode)",
                 LogTag::Ok,
             );
-        } else {
-            println!("Flash complete (device left in BOOTSEL mode)");
         }
         return Ok(());
     }
 
-    let maybe_spin2 = if on_event.is_none() {
+    let maybe_spin2 = if use_terminal_output(&on_event) {
         Some(ui::spinner("Waiting for device to reboot\u{2026}"))
     } else {
         report(

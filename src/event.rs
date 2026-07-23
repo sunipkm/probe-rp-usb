@@ -2,12 +2,16 @@
 //!
 //! Each library function that produces output accepts an optional
 //! [`EventCallback`].  When `None` is passed the function behaves exactly as
-//! before (indicatif progress bars, `println!`, `eprintln!` output).
+//! before (indicatif progress bars, `println!`, `eprintln!` output), unless
+//! [`set_silent_output`] is enabled.
 //! When `Some(cb)` is passed every message and progress update is routed
 //! through the callback instead, making the library embeddable inside async
 //! servers or other tools without polluting stdout.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static SILENT_OUTPUT: AtomicBool = AtomicBool::new(false);
 
 /// A single event emitted by a library operation.
 #[derive(Debug, Clone)]
@@ -37,6 +41,27 @@ pub enum LogTag {
 /// [`Arc`] and pass it to any library function that accepts
 /// `Option<EventCallback>`.
 pub type EventCallback = Arc<dyn Fn(ProbeEvent) + Send + Sync + 'static>;
+
+/// Enable or disable default terminal output (progress bars, `println!`,
+/// `eprintln!`) when no event callback is provided.
+///
+/// This is useful for crates embedding `probe-rp-usb` where the caller wants
+/// complete control over presentation.
+pub fn set_silent_output(silent: bool) {
+    SILENT_OUTPUT.store(silent, Ordering::Relaxed);
+}
+
+/// Returns whether silent output mode is currently enabled.
+pub fn silent_output_enabled() -> bool {
+    SILENT_OUTPUT.load(Ordering::Relaxed)
+}
+
+/// Returns `true` when terminal output should be rendered directly by this
+/// crate (CLI-style behavior).
+#[inline]
+pub(crate) fn use_terminal_output(on_event: &Option<EventCallback>) -> bool {
+    on_event.is_none() && !silent_output_enabled()
+}
 
 /// Convenience helper: if `on_event` is `Some`, invoke the callback with a
 /// `Log` event.  When `None`, does nothing (caller is responsible for any
