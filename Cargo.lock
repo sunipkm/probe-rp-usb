@@ -1164,6 +1164,7 @@ dependencies = [
  "sysinfo",
  "thiserror",
  "vergen-git2",
+ "wdi-rs",
 ]
 
 [[package]]
@@ -1369,6 +1370,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "tempfile"
+version = "3.27.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
+dependencies = [
+ "fastrand",
+ "getrandom",
+ "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "thiserror"
 version = "2.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1540,6 +1554,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1b4cb0cc549fcf58d7dfc081778139b3d283a081644e833e84682ad71cea24"
 dependencies = [
  "unicode-ident",
+]
+
+[[package]]
+name = "wdi-rs"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1b864d62e00450b7e5af3e0f39e1b534dc3a13438f8f9f17747da540dd0ab581"
+dependencies = [
+ "log",
+ "tempfile",
 ]
 
 [[package]]

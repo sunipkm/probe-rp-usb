@@ -5,7 +5,7 @@ use nusb::{DeviceInfo, Interface, MaybeFuture};
 use std::io::{Read, Write};
 use std::time::Duration;
 
-use crate::usb::{DEFAULT_VID, FALLBACK_VIDS, reset_to_bootsel, select_unique_device};
+use crate::usb::{DEFAULT_VID, FALLBACK_VIDS, ensure_winusb_driver, reset_to_bootsel, select_unique_device};
 
 /// BOOTSEL/PICOBOOT product ID for RP2xxx boot ROM devices.
 pub const PRODUCT_ID_RP_USBBOOT: u16 = 0x000F;
@@ -51,6 +51,8 @@ pub struct PicobootConnection {
 
 impl PicobootConnection {
     pub fn open_after_reset(vid: Option<u16>, pid: Option<u16>, timeout: Duration) -> Result<Self> {
+        ensure_winusb_driver(vid, pid).context("Failed to prepare WinUSB driver")?;
+
         if let Some(connection) = Self::try_open_candidates(vid)? {
             return Ok(connection);
         }
@@ -68,6 +70,8 @@ impl PicobootConnection {
     }
 
     pub fn open(vid: Option<u16>) -> Result<Self> {
+        ensure_winusb_driver(vid, None).context("Failed to prepare WinUSB driver")?;
+
         let vid = vid.unwrap_or(DEFAULT_VID);
         let info =
             select_unique_device(&[(vid, Some(PRODUCT_ID_RP_USBBOOT))])?.ok_or_else(|| {

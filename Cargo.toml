@@ -25,5 +25,8 @@ sysinfo = "0.39"
 thiserror = "2"
 supports-unicode = "3.0.0"
 
+[target.'cfg(windows)'.dependencies]
+wdi-rs = "0.1"
+
 [build-dependencies]
 vergen-git2 = "10"

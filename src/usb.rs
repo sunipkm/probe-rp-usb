@@ -53,6 +53,217 @@ const RESET_INTERFACE_SUBCLASS: u8 = 0x00;
 const RESET_INTERFACE_PROTOCOL: u8 = 0x01;
 const RESET_REQUEST_BOOTSEL: u8 = 0x01;
 
+#[cfg(target_os = "windows")]
+fn upper_opt(s: &Option<String>) -> String {
+    s.as_deref().unwrap_or_default().to_ascii_uppercase()
+}
+
+#[cfg(target_os = "windows")]
+fn is_bootsel_device(device: &wdi_rs::Device, primary_vid: u16) -> bool {
+    device.vid == primary_vid && device.pid == PRODUCT_ID_RP_USBBOOT
+}
+
+#[cfg(target_os = "windows")]
+fn matches_known_probe_id(
+    device: &wdi_rs::Device,
+    primary_vid: u16,
+    primary_pid: u16,
+    allow_fallback_vids: bool,
+) -> bool {
+    (device.vid == primary_vid
+        && (device.pid == primary_pid || device.pid == PRODUCT_ID_RP_USBBOOT))
+        || (allow_fallback_vids && FALLBACK_VIDS.contains(&device.vid))
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_reset_signature(device: &wdi_rs::Device) -> bool {
+    let hardware = upper_opt(&device.hardware_id);
+    let compat = upper_opt(&device.compatible_id);
+    let desc = upper_opt(&device.desc);
+    let dev_id = upper_opt(&device.device_id);
+
+    let mentions_reset = desc.contains("RP2XXX-RESET")
+        || desc.contains("RESET")
+        || hardware.contains("RP2XXX-RESET")
+        || compat.contains("RP2XXX-RESET")
+        || dev_id.contains("RP2XXX-RESET");
+
+    let class_ff = hardware.contains("CLASS_FF") || compat.contains("CLASS_FF");
+    let subclass_00 = hardware.contains("SUBCLASS_00") || compat.contains("SUBCLASS_00");
+    let prot_01 = hardware.contains("PROT_01") || compat.contains("PROT_01");
+
+    mentions_reset || (class_ff && subclass_00 && prot_01)
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_cdc_acm(device: &wdi_rs::Device) -> bool {
+    let hardware = upper_opt(&device.hardware_id);
+    let compat = upper_opt(&device.compatible_id);
+    let desc = upper_opt(&device.desc);
+
+    let class_02 = hardware.contains("CLASS_02") || compat.contains("CLASS_02");
+    let subclass_02 = hardware.contains("SUBCLASS_02") || compat.contains("SUBCLASS_02");
+
+    (class_02 && subclass_02) || desc.contains("CDC") || desc.contains("ACM")
+}
+
+#[cfg(target_os = "windows")]
+fn looks_like_picotool_interface(
+    device: &wdi_rs::Device,
+    primary_vid: u16,
+    primary_pid: u16,
+    allow_fallback_vids: bool,
+) -> bool {
+    if looks_like_cdc_acm(device) {
+        return false;
+    }
+
+    if is_bootsel_device(device, primary_vid) {
+        return true;
+    }
+
+    if !matches_known_probe_id(device, primary_vid, primary_pid, allow_fallback_vids) {
+        return false;
+    }
+
+    if looks_like_reset_signature(device) {
+        return true;
+    }
+
+    let hardware = upper_opt(&device.hardware_id);
+    let compat = upper_opt(&device.compatible_id);
+    let dev_id = upper_opt(&device.device_id);
+    let has_interface_id = hardware.contains("MI_") || dev_id.contains("MI_");
+
+    hardware.contains("CLASS_FF") || compat.contains("CLASS_FF") || has_interface_id
+}
+
+#[cfg(target_os = "windows")]
+fn is_bootsel_mass_storage(device: &wdi_rs::Device, primary_vid: u16) -> bool {
+    if !is_bootsel_device(device, primary_vid) {
+        return false;
+    }
+    let driver = upper_opt(&device.driver);
+    let desc = upper_opt(&device.desc);
+    let hardware = upper_opt(&device.hardware_id);
+    let compat = upper_opt(&device.compatible_id);
+
+    driver.contains("USBSTOR")
+        || desc.contains("MASS STORAGE")
+        || hardware.contains("CLASS_08")
+        || compat.contains("CLASS_08")
+}
+
+#[cfg(target_os = "windows")]
+fn summarize_wdi_device(device: &wdi_rs::Device) -> String {
+    let desc = device.desc.as_deref().unwrap_or("(no description)");
+    let driver = device.driver.as_deref().unwrap_or("(none)");
+    let hwid = device.hardware_id.as_deref().unwrap_or("(no hardware_id)");
+    format!(
+        "{:04X}:{:04X} MI{:02} desc='{}' driver='{}' hwid='{}'",
+        device.vid, device.pid, device.mi, desc, driver, hwid
+    )
+}
+
+/// Ensure a libusb-compatible (WinUSB) driver is attached to relevant reset or
+/// PICOBOOT interfaces on Windows.
+///
+/// This installs WinUSB only for devices with no suitable driver bound yet. If
+/// Windows already bound BOOTSEL to USB mass storage (`USBSTOR`), that is left
+/// untouched and not treated as an installation failure.
+#[cfg(target_os = "windows")]
+pub fn ensure_winusb_driver(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
+    use wdi_rs::{CreateListOptions, DriverInstaller, DriverType, Error as WdiError, create_list};
+
+    let primary_vid = vid.unwrap_or(DEFAULT_VID);
+    let primary_pid = pid.unwrap_or(DEFAULT_PID);
+    let allow_fallback_vids = vid.is_none();
+
+    let devices = create_list(CreateListOptions {
+        list_all: true,
+        list_hubs: false,
+        trim_whitespaces: true,
+    })
+    .map_err(|e| anyhow!("Could not enumerate USB devices for driver setup: {e}"))?;
+
+    let all_devices: Vec<_> = devices.iter().collect();
+    let known_devices: Vec<_> = all_devices
+        .iter()
+        .filter(|d| matches_known_probe_id(d, primary_vid, primary_pid, allow_fallback_vids))
+        .cloned()
+        .collect();
+    let targets: Vec<_> = all_devices
+        .iter()
+        .filter(|d| {
+            looks_like_picotool_interface(d, primary_vid, primary_pid, allow_fallback_vids)
+                && !is_bootsel_mass_storage(d, primary_vid)
+        })
+        .cloned()
+        .collect();
+
+    if targets.is_empty() {
+        if known_devices.is_empty() {
+            return Ok(());
+        }
+
+        if known_devices
+            .iter()
+            .all(|device| is_bootsel_mass_storage(device, primary_vid))
+        {
+            return Ok(());
+        }
+
+        let known_summary = known_devices
+            .iter()
+            .map(summarize_wdi_device)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        anyhow::bail!(
+            "Matching USB devices were found, but no reset/picotool-capable interface could be selected for WinUSB install. Connected entries: {known_summary}"
+        );
+    }
+
+    let mut failures = Vec::new();
+    for device in &targets {
+        match DriverInstaller::for_specific_device(device.clone())
+            .with_driver_type(DriverType::WinUsb)
+            .install()
+        {
+            Ok(_) => {}
+            Err(WdiError::Exists) => {
+                let current = upper_opt(&device.driver);
+                if !current.starts_with("WINUSB") {
+                    let current_driver = device.driver.as_deref().unwrap_or("unknown");
+                    failures.push(format!(
+                        "{} already has non-WinUSB driver '{}'",
+                        summarize_wdi_device(device),
+                        current_driver,
+                    ));
+                }
+            }
+            Err(WdiError::NeedsAdmin) => failures.push(format!(
+                "{} requires Administrator privileges",
+                summarize_wdi_device(device)
+            )),
+            Err(e) => failures.push(format!("{}: {e}", summarize_wdi_device(device))),
+        }
+    }
+
+    if failures.is_empty() {
+        return Ok(());
+    }
+
+    anyhow::bail!(
+        "Failed to attach WinUSB driver for one or more probe interfaces. Run the tool as Administrator and retry. Details: {}",
+        failures.join(" | ")
+    )
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn ensure_winusb_driver(_vid: Option<u16>, _pid: Option<u16>) -> Result<()> {
+    Ok(())
+}
+
 /// Find a USB device by VID/PID.
 pub fn find_device(vid: u16, pid: u16) -> Option<DeviceInfo> {
     nusb::list_devices()
@@ -226,6 +437,8 @@ fn reboot_to_normal_via_picoboot(info: &DeviceInfo) -> Result<()> {
 /// 3. If `vid` was **not** specified by the caller, also scan for any device
 ///    with a fallback VID (`0xC0DE`, `0xC001`) and attempt the reset interface.
 pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
+    ensure_winusb_driver(vid, pid).context("Failed to prepare WinUSB driver")?;
+
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
@@ -288,6 +501,8 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
 /// 3. If `vid` was **not** specified by the caller, also scan fallback VIDs
 ///    (`0xC0DE`, `0xC001`) for either an app-mode or BOOTSEL device.
 pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
+    ensure_winusb_driver(vid, pid).context("Failed to prepare WinUSB driver")?;
+
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 

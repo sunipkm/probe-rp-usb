@@ -120,20 +120,21 @@ Serial port (`attach` / `watch` / `run`) works out of the box via the
 Windows CDC-ACM class driver.
 
 The `reset` and `flash` subcommands send vendor control transfers or PICOBOOT
-commands over USB.  Windows does not have a built-in WinUSB driver for these
-interfaces, so you must install one manually **once per device**:
+commands over USB. On Windows, `probe-rp-usb` now attempts to install a
+WinUSB binding automatically when it detects a matching reset or PICOBOOT
+interface that has no suitable driver yet.
 
-1. Download and run [Zadig](https://zadig.akeo.ie/).
-2. In Zadig, select **Options → List All Devices**.
-3. Select your device (e.g. *Raspberry Pi Pico* or your custom VID).
-4. Choose **WinUSB** as the driver and click **Install Driver** (or
-   **Replace Driver** if another driver is already bound).
+If Windows prompts for elevation, rerun from an Administrator shell.
 
-Repeat for any device with a different USB VID you intend to use.
+Automatic driver setup does not replace an already-bound non-WinUSB driver.
+If a required interface is already claimed by another driver, replace it
+manually with [Zadig](https://zadig.akeo.ie/):
 
-> **Note:** The BOOTSEL mass-storage drive (used during flashing) is handled
-> by the Windows USB Mass Storage driver automatically — no Zadig step needed
-> for that interface.
+1. Open Zadig and enable **Options → List All Devices**.
+2. Select the vendor reset or PICOBOOT interface for your device.
+3. Choose **WinUSB** and click **Install Driver** or **Replace Driver**.
+
+The BOOTSEL mass-storage binding (`USBSTOR`) is left alone intentionally.
 
 
 ## Usage
