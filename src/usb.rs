@@ -3,7 +3,7 @@ use nusb::transfer::{ControlOut, ControlType, Recipient};
 use nusb::{DeviceInfo, MaybeFuture};
 use std::time::Duration;
 
-use crate::picoboot::{PRODUCT_ID_RP_USBBOOT, PicobootConnection};
+use crate::picoboot::{PicobootConnection, bootsel_ids, bootsel_selectors, is_bootsel_id};
 
 /// USB class/subclass for CDC Abstract Control Model (serial) interfaces.
 const CDC_CLASS: u8 = 0x02;
@@ -60,7 +60,7 @@ fn upper_opt(s: &Option<String>) -> String {
 
 #[cfg(all(feature = "wdi", target_os = "windows"))]
 fn is_bootsel_device(device: &wdi_rs::Device, primary_vid: u16) -> bool {
-    device.vid == primary_vid && device.pid == PRODUCT_ID_RP_USBBOOT
+    device.vid == primary_vid && is_bootsel_id(device.vid, device.pid)
 }
 
 #[cfg(all(feature = "wdi", target_os = "windows"))]
@@ -71,7 +71,7 @@ fn matches_known_probe_id(
     allow_fallback_vids: bool,
 ) -> bool {
     (device.vid == primary_vid
-        && (device.pid == primary_pid || device.pid == PRODUCT_ID_RP_USBBOOT))
+        && (device.pid == primary_pid || is_bootsel_id(device.vid, device.pid)))
         || (allow_fallback_vids && FALLBACK_VIDS.contains(&device.vid))
 }
 
@@ -435,7 +435,8 @@ fn reboot_to_normal_via_picoboot(info: &DeviceInfo) -> Result<()> {
 ///
 /// Strategy (applied in order):
 /// 1. App-mode device at `vid`/`pid` → USB reset interface.
-/// 2. Same `vid` + USBBOOT PID `0x000F` → PICOBOOT `PC_REBOOT2`.
+/// 2. Same `vid` + USBBOOT PID (`0x000F` RP2350, `0x0003` RP2040) → PICOBOOT
+///    `PC_REBOOT2` (no-op on RP2040, which is already in BOOTSEL).
 /// 3. If `vid` was **not** specified by the caller, also scan for any device
 ///    with a fallback VID (`0xC0DE`, `0xC001`) and attempt the reset interface.
 pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
@@ -444,7 +445,9 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    if let Some(info) = select_unique_device(&[(primary_vid, Some(primary_pid))])? {
+    if !is_bootsel_id(primary_vid, primary_pid)
+        && let Some(info) = select_unique_device(&[(primary_vid, Some(primary_pid))])?
+    {
         log::info!(
             "Found app-mode device {:04x}:{:04x} — sending reset interface request",
             primary_vid,
@@ -453,11 +456,11 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         return reboot_via_reset_interface(&info);
     }
 
-    if let Some(info) = select_unique_device(&[(primary_vid, Some(PRODUCT_ID_RP_USBBOOT))])? {
+    if let Some(info) = select_unique_device(&bootsel_selectors(primary_vid, pid))? {
         log::info!(
-            "Device {:04x}:{:04x} already in BOOTSEL — sending PC_REBOOT2",
-            primary_vid,
-            PRODUCT_ID_RP_USBBOOT
+            "Device {:04x}:{:04x} already in BOOTSEL — requesting BOOTSEL reboot",
+            info.vendor_id(),
+            info.product_id()
         );
         return reboot_via_picoboot(&info);
     }
@@ -486,11 +489,10 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         String::new()
     };
     anyhow::bail!(
-        "No device found at {:04x}:{:04x} (app mode) or {:04x}:{:04x} (BOOTSEL){}",
+        "No device found at {:04x}:{:04x} (app mode) or {} (BOOTSEL){}",
         primary_vid,
         primary_pid,
-        primary_vid,
-        PRODUCT_ID_RP_USBBOOT,
+        bootsel_ids(primary_vid, pid),
         fallback_hint,
     )
 }
@@ -499,7 +501,8 @@ pub fn reset_to_bootsel(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
 ///
 /// Strategy (applied in order):
 /// 1. App-mode device at `vid`/`pid` → already in normal mode, return success.
-/// 2. Same `vid` + USBBOOT PID `0x000F` → PICOBOOT `PC_REBOOT2` normal reboot.
+/// 2. Same `vid` + USBBOOT PID (`0x000F` RP2350, `0x0003` RP2040) → PICOBOOT normal
+///    reboot (`PC_REBOOT2` on RP2350, `PC_REBOOT` on RP2040).
 /// 3. If `vid` was **not** specified by the caller, also scan fallback VIDs
 ///    (`0xC0DE`, `0xC001`) for either an app-mode or BOOTSEL device.
 pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
@@ -508,7 +511,9 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
     let primary_vid = vid.unwrap_or(DEFAULT_VID);
     let primary_pid = pid.unwrap_or(DEFAULT_PID);
 
-    if select_unique_device(&[(primary_vid, Some(primary_pid))])?.is_some() {
+    if !is_bootsel_id(primary_vid, primary_pid)
+        && select_unique_device(&[(primary_vid, Some(primary_pid))])?.is_some()
+    {
         log::info!(
             "Device {:04x}:{:04x} already in normal application mode",
             primary_vid,
@@ -517,11 +522,11 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         return Ok(());
     }
 
-    if let Some(info) = select_unique_device(&[(primary_vid, Some(PRODUCT_ID_RP_USBBOOT))])? {
+    if let Some(info) = select_unique_device(&bootsel_selectors(primary_vid, pid))? {
         log::info!(
-            "Device {:04x}:{:04x} in BOOTSEL — sending PC_REBOOT2 normal reboot",
-            primary_vid,
-            PRODUCT_ID_RP_USBBOOT
+            "Device {:04x}:{:04x} in BOOTSEL — sending normal reboot",
+            info.vendor_id(),
+            info.product_id()
         );
         return reboot_to_normal_via_picoboot(&info);
     }
@@ -531,7 +536,7 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         let fallback_bootsel_selectors: Vec<(u16, Option<u16>)> = FALLBACK_VIDS
             .iter()
             .copied()
-            .map(|fvid| (fvid, Some(PRODUCT_ID_RP_USBBOOT)))
+            .flat_map(|fvid| bootsel_selectors(fvid, None))
             .collect();
         if let Some(info) = select_unique_device(&fallback_bootsel_selectors)? {
             log::info!(
@@ -564,11 +569,10 @@ pub fn reboot_to_normal(vid: Option<u16>, pid: Option<u16>) -> Result<()> {
         String::new()
     };
     anyhow::bail!(
-        "No device found at {:04x}:{:04x} (app mode) or {:04x}:{:04x} (BOOTSEL){}",
+        "No device found at {:04x}:{:04x} (app mode) or {} (BOOTSEL){}",
         primary_vid,
         primary_pid,
-        primary_vid,
-        PRODUCT_ID_RP_USBBOOT,
+        bootsel_ids(primary_vid, pid),
         fallback_hint,
     )
 }

@@ -1,6 +1,8 @@
 # RP2040/RP2350 — app mode (stdio USB, default PID 0x0009)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", GROUP="plugdev", TAG+="uaccess", MODE="0666"
-# RP2040/RP2350 — BOOTSEL / picoboot (PID 0x000f)
+# RP2040 — BOOTSEL / picoboot (PID 0x0003)
+SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="0003", GROUP="plugdev", TAG+="uaccess", MODE="0666"
+# RP2350 — BOOTSEL / picoboot (PID 0x000f)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="2e8a", ATTRS{idProduct}=="000f", GROUP="plugdev", TAG+="uaccess", MODE="0666"
 # Custom VID fallback (0xC0DE / 0xC001)
 SUBSYSTEM=="usb", ATTRS{idVendor}=="c0de", GROUP="plugdev", TAG+="uaccess", MODE="0666"

@@ -9,23 +9,59 @@ use crate::usb::{
     DEFAULT_VID, FALLBACK_VIDS, ensure_winusb_driver, reset_to_bootsel, select_unique_device,
 };
 
-/// BOOTSEL/PICOBOOT product ID for RP2xxx boot ROM devices.
+/// BOOTSEL/PICOBOOT product ID of the RP2350 boot ROM (Pico 2).
 pub const PRODUCT_ID_RP_USBBOOT: u16 = 0x000F;
+
+/// BOOTSEL/PICOBOOT product ID of the RP2040 boot ROM (Pico).
+pub const PRODUCT_ID_RP2040_USBBOOT: u16 = 0x0003;
+
+/// Whether `vid`/`pid` identifies a boot ROM in BOOTSEL mode.
+///
+/// The RP2040 boot ROM has a fixed VID, so its PID is only recognized together
+/// with the Raspberry Pi VID. The RP2350 VID can be customized in OTP.
+pub(crate) fn is_bootsel_id(vid: u16, pid: u16) -> bool {
+    pid == PRODUCT_ID_RP_USBBOOT || (vid == DEFAULT_VID && pid == PRODUCT_ID_RP2040_USBBOOT)
+}
+
+/// VID/PID selectors matching BOOTSEL devices with the given VID.
+///
+/// If `pid` itself is a BOOTSEL PID, only that PID is selected.
+pub(crate) fn bootsel_selectors(vid: u16, pid: Option<u16>) -> Vec<(u16, Option<u16>)> {
+    let explicit = pid.filter(|&p| is_bootsel_id(vid, p));
+    [PRODUCT_ID_RP_USBBOOT, PRODUCT_ID_RP2040_USBBOOT]
+        .into_iter()
+        .filter(|&p| is_bootsel_id(vid, p) && explicit.is_none_or(|e| e == p))
+        .map(|p| (vid, Some(p)))
+        .collect()
+}
+
+/// Render the BOOTSEL IDs for `vid` for use in error messages.
+pub(crate) fn bootsel_ids(vid: u16, pid: Option<u16>) -> String {
+    bootsel_selectors(vid, pid)
+        .into_iter()
+        .filter_map(|(v, p)| p.map(|p| format!("{v:04x}:{p:04x}")))
+        .collect::<Vec<_>>()
+        .join(" or ")
+}
 
 const PICOBOOT_MAGIC: u32 = 0x431F_D10B;
 
 const PICOBOOT_IF_CMD_STATUS: u8 = 0x42;
 
+/// RP2040 only; the RP2350 replaces it with `PC_REBOOT2`.
+const PC_REBOOT: u8 = 0x02;
 const PC_FLASH_ERASE: u8 = 0x03;
 const PC_READ: u8 = 0x84;
 const PC_WRITE: u8 = 0x05;
 const PC_EXIT_XIP: u8 = 0x06;
+/// RP2350 only.
 const PC_REBOOT2: u8 = 0x0A;
 
 const REBOOT2_FLAG_REBOOT_TYPE_NORMAL: u32 = 0x00;
 const REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL: u32 = 0x02;
 const REBOOT2_FLAG_REBOOT_TYPE_FLASH_UPDATE: u32 = 0x04;
 
+const PICOBOOT_REBOOT_CMD_SIZE: u8 = 12;
 const PICOBOOT_REBOOT2_CMD_SIZE: u8 = 16;
 const PICOBOOT_RANGE_CMD_SIZE: u8 = 8;
 
@@ -49,20 +85,21 @@ pub struct PicobootConnection {
     out_ep: u8,
     in_ep: u8,
     next_token: u32,
+    is_rp2040: bool,
 }
 
 impl PicobootConnection {
     pub fn open_after_reset(vid: Option<u16>, pid: Option<u16>, timeout: Duration) -> Result<Self> {
         ensure_winusb_driver(vid, pid).context("Failed to prepare WinUSB driver")?;
 
-        if let Some(connection) = Self::try_open_candidates(vid)? {
+        if let Some(connection) = Self::try_open_candidates(vid, pid)? {
             return Ok(connection);
         }
 
         reset_to_bootsel(vid, pid)?;
         let start = std::time::Instant::now();
         while start.elapsed() < timeout {
-            if let Some(connection) = Self::try_open_candidates(vid)? {
+            if let Some(connection) = Self::try_open_candidates(vid, pid)? {
                 return Ok(connection);
             }
             std::thread::sleep(Duration::from_millis(100));
@@ -75,25 +112,23 @@ impl PicobootConnection {
         ensure_winusb_driver(vid, None).context("Failed to prepare WinUSB driver")?;
 
         let vid = vid.unwrap_or(DEFAULT_VID);
-        let info =
-            select_unique_device(&[(vid, Some(PRODUCT_ID_RP_USBBOOT))])?.ok_or_else(|| {
-                anyhow!(
-                    "No BOOTSEL/PICOBOOT device found at {:04x}:{:04x}",
-                    vid,
-                    PRODUCT_ID_RP_USBBOOT
-                )
-            })?;
+        let info = select_unique_device(&bootsel_selectors(vid, None))?.ok_or_else(|| {
+            anyhow!(
+                "No BOOTSEL/PICOBOOT device found at {}",
+                bootsel_ids(vid, None)
+            )
+        })?;
         Self::open_device(&info)
     }
 
-    fn try_open_candidates(vid: Option<u16>) -> Result<Option<Self>> {
-        let mut selectors = vec![(vid.unwrap_or(DEFAULT_VID), Some(PRODUCT_ID_RP_USBBOOT))];
+    fn try_open_candidates(vid: Option<u16>, pid: Option<u16>) -> Result<Option<Self>> {
+        let mut selectors = bootsel_selectors(vid.unwrap_or(DEFAULT_VID), pid);
         if vid.is_none() {
             selectors.extend(
                 FALLBACK_VIDS
                     .iter()
                     .copied()
-                    .map(|candidate_vid| (candidate_vid, Some(PRODUCT_ID_RP_USBBOOT))),
+                    .flat_map(|candidate_vid| bootsel_selectors(candidate_vid, None)),
             );
         }
 
@@ -142,10 +177,19 @@ impl PicobootConnection {
             out_ep,
             in_ep,
             next_token: 1,
+            is_rp2040: info.vendor_id() == DEFAULT_VID
+                && info.product_id() == PRODUCT_ID_RP2040_USBBOOT,
         })
     }
 
+    /// Reboot into BOOTSEL mode.
+    ///
+    /// The RP2040 boot ROM has no such command, but a device with an open
+    /// PICOBOOT connection is already in BOOTSEL mode, so this is a no-op there.
     pub fn reboot_bootsel(&mut self) -> Result<()> {
+        if self.is_rp2040 {
+            return Ok(());
+        }
         let token = self.next_token();
         let command = build_reboot2_command(token, REBOOT2_FLAG_REBOOT_TYPE_BOOTSEL, 500, 0, 0);
         let _ = self.command(command, None, true);
@@ -153,6 +197,9 @@ impl PicobootConnection {
     }
 
     pub fn reboot_application(&mut self) -> Result<()> {
+        if self.is_rp2040 {
+            return self.reboot_rp2040();
+        }
         let token = self.next_token();
         let command = build_reboot2_command(token, REBOOT2_FLAG_REBOOT_TYPE_NORMAL, 500, 0, 0);
         let _ = self.command(command, None, true);
@@ -160,6 +207,10 @@ impl PicobootConnection {
     }
 
     pub fn reboot_flash_update(&mut self, updated_addr: u32) -> Result<()> {
+        if self.is_rp2040 {
+            // The RP2040 has no flash-update boot; a normal boot runs the new image.
+            return self.reboot_rp2040();
+        }
         let token = self.next_token();
         let command = build_reboot2_command(
             token,
@@ -169,6 +220,12 @@ impl PicobootConnection {
             0,
         );
         let _ = self.command(command, None, true);
+        Ok(())
+    }
+
+    fn reboot_rp2040(&mut self) -> Result<()> {
+        let token = self.next_token();
+        let _ = self.command(build_reboot_command(token, 500), None, true);
         Ok(())
     }
 
@@ -371,6 +428,13 @@ fn build_range_command(
     )
 }
 
+/// RP2040 `PC_REBOOT` with PC = SP = 0, i.e. a regular boot from flash.
+fn build_reboot_command(token: u32, delay_ms: u32) -> [u8; COMMAND_PACKET_SIZE] {
+    let mut args = [0u8; 16];
+    args[8..12].copy_from_slice(&delay_ms.to_le_bytes());
+    build_command(token, PC_REBOOT, PICOBOOT_REBOOT_CMD_SIZE, 0, args)
+}
+
 fn build_reboot2_command(
     token: u32,
     flags: u32,
@@ -438,6 +502,30 @@ mod tests {
         assert_eq!(&command[12..16], &0u32.to_le_bytes());
         assert_eq!(&command[16..20], &2u32.to_le_bytes());
         assert_eq!(&command[20..24], &500u32.to_le_bytes());
+    }
+
+    #[test]
+    fn serializes_rp2040_reboot_command() {
+        let command = build_reboot_command(1, 500);
+        assert_eq!(command[8], PC_REBOOT);
+        assert_eq!(command[9], 12);
+        assert_eq!(&command[12..24], &[0u8; 12]);
+        assert_eq!(&command[24..28], &500u32.to_le_bytes());
+    }
+
+    #[test]
+    fn selects_bootsel_ids() {
+        assert_eq!(
+            bootsel_selectors(0x2E8A, None),
+            [(0x2E8A, Some(0x000F)), (0x2E8A, Some(0x0003))]
+        );
+        assert_eq!(
+            bootsel_selectors(0x2E8A, Some(0x0003)),
+            [(0x2E8A, Some(0x0003))]
+        );
+        assert_eq!(bootsel_selectors(0x2E8A, Some(0x0009)).len(), 2);
+        // The RP2040 PID must not match custom-VID (application) devices.
+        assert_eq!(bootsel_selectors(0xC0DE, None), [(0xC0DE, Some(0x000F))]);
     }
 
     #[test]
