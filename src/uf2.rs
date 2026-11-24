@@ -33,7 +33,7 @@ pub enum Family {
 /// `block_no` (starting at `start_block`) and the global `num_blocks` count
 /// across all blocks.
 pub fn renumber_blocks(data: &mut [u8], start_block: u32, num_blocks: u32) {
-    for (i, block) in data.chunks_exact_mut(512).enumerate() {
+    for (i, block) in data.as_chunks_mut::<512>().0.iter_mut().enumerate() {
         let block_no = start_block + i as u32;
         block[20..24].copy_from_slice(&block_no.to_le_bytes());
         block[24..28].copy_from_slice(&num_blocks.to_le_bytes());
@@ -93,7 +93,7 @@ pub fn uf2_to_regions(data: &[u8]) -> anyhow::Result<Vec<(u32, Vec<u8>)>> {
     );
 
     let mut blocks = Vec::new();
-    for block in data.chunks_exact(512) {
+    for block in data.as_chunks::<512>().0 {
         let start0 = u32::from_le_bytes(block[0..4].try_into().unwrap());
         let start1 = u32::from_le_bytes(block[4..8].try_into().unwrap());
         let target_addr = u32::from_le_bytes(block[12..16].try_into().unwrap());
